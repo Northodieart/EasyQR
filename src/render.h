@@ -21,8 +21,8 @@ struct Palette {
 };
 
 struct FontSet {
-    ComPtr<IDWriteTextFormat> appTitle;
-    ComPtr<IDWriteTextFormat> appSubtitle;
+    ComPtr<IDWriteTextFormat> heading;
+    ComPtr<IDWriteTextFormat> label;
     ComPtr<IDWriteTextFormat> cardTitle;
     ComPtr<IDWriteTextFormat> cardBody;
     ComPtr<IDWriteTextFormat> footer;
@@ -38,13 +38,11 @@ enum class TextAlign { Leading, Center, Trailing };
 enum class IconId {
     Screen,
     Region,
-    Shield,
     Warning,
-    Check,
-    Info,
     Link,
     Crosshair,
-    ChevronRight,
+    Settings,
+    ArrowLeft,
 };
 
 Palette MakePalette(bool dark);
@@ -61,5 +59,3 @@ float MeasureTextWidth(IDWriteFactory* factory, IDWriteTextFormat* format,
 
 void DrawIcon(ID2D1RenderTarget* target, IconId icon, const D2D1_RECT_F& rect,
               const D2D1_COLOR_F& color, ID2D1SolidColorBrush* brush, float stroke = 1.5f);
-void DrawAppLogo(ID2D1RenderTarget* target, const D2D1_RECT_F& rect,
-                 ID2D1SolidColorBrush* brush, float radius);

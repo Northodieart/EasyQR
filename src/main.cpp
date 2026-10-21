@@ -1,8 +1,7 @@
 #include "app.h"
-#include "capture.h"
 #include "overlay.h"
-#include "version.h"
 #include "resource.h"
+#include "version.h"
 
 #include <cwchar>
 
@@ -10,18 +9,30 @@ AppState g_app;
 
 namespace {
 
-constexpr float kClientWidth = 560.0f;
-constexpr float kClientHeight = 336.0f;
-constexpr float kMargin = 24.0f;
-constexpr float kCardTop = 104.0f;
-constexpr float kCardWidth = 244.0f;
-constexpr float kCardHeight = 168.0f;
-constexpr float kCardGap = 24.0f;
+constexpr float kClientWidth = 400.0f;
+constexpr float kClientHeight = 240.0f;
 
-const D2D1_RECT_F kCardRects[2] = {
-    D2D1::RectF(kMargin, kCardTop, kMargin + kCardWidth, kCardTop + kCardHeight),
-    D2D1::RectF(kMargin + kCardWidth + kCardGap, kCardTop,
-                kMargin + kCardWidth * 2 + kCardGap, kCardTop + kCardHeight),
+enum ControlId : int {
+    kControlNone = -1,
+    kFullScreen = 0,
+    kRegion = 1,
+    kSettings = 2,
+    kBack = 10,
+    kThemeSystem = 11,
+    kThemeLight = 12,
+    kThemeDark = 13,
+};
+
+const D2D1_RECT_F kTileRects[2] = {
+    D2D1::RectF(24.0f, 48.0f, 192.0f, 208.0f),
+    D2D1::RectF(208.0f, 48.0f, 376.0f, 208.0f),
+};
+const D2D1_RECT_F kSettingsRect = D2D1::RectF(344.0f, 12.0f, 376.0f, 44.0f);
+const D2D1_RECT_F kBackRect = D2D1::RectF(16.0f, 10.0f, 48.0f, 42.0f);
+const D2D1_RECT_F kThemeRects[3] = {
+    D2D1::RectF(24.0f, 88.0f, 136.0f, 122.0f),
+    D2D1::RectF(144.0f, 88.0f, 256.0f, 122.0f),
+    D2D1::RectF(264.0f, 88.0f, 376.0f, 122.0f),
 };
 
 bool IsDarkThemePreferred() {
@@ -52,8 +63,7 @@ void SetDwmAttribute(HWND hwnd, DWORD attribute, const void* value, DWORD size) 
 }
 
 void EnsureRenderTarget(HWND hwnd) {
-    if (g_app.rt) return;
-    if (!g_app.d2d) return;
+    if (g_app.rt || !g_app.d2d) return;
 
     RECT client{};
     GetClientRect(hwnd, &client);
@@ -87,17 +97,89 @@ void DiscardRenderTarget() {
     g_app.rt.Reset();
 }
 
-int HitTestCard(float x, float y) {
-    for (int i = 0; i < 2; ++i) {
-        if (PointInRect(kCardRects[i], x, y)) return i;
-    }
-    return -1;
+bool IsFocused(int control) {
+    return g_app.keyboardFocus && g_app.focusControl == control && GetFocus() == g_app.hwnd;
 }
 
-void DrawCard(ID2D1HwndRenderTarget* rt, int index, bool keyboardFocused) {
-    const D2D1_RECT_F rect = kCardRects[index];
-    const bool hovered = g_app.hoverCard == index;
-    const bool pressed = g_app.pressedCard == index;
+int ControlAt(float x, float y) {
+    if (g_app.view == MainView::Home) {
+        for (int i = 0; i < 2; ++i) {
+            if (PointInRect(kTileRects[i], x, y)) return i;
+        }
+        if (PointInRect(kSettingsRect, x, y)) return kSettings;
+        return kControlNone;
+    }
+
+    if (PointInRect(kBackRect, x, y)) return kBack;
+    for (int i = 0; i < 3; ++i) {
+        if (PointInRect(kThemeRects[i], x, y)) return kThemeSystem + i;
+    }
+    return kControlNone;
+}
+
+std::vector<int> FocusOrder() {
+    if (g_app.view == MainView::Home) return {kFullScreen, kRegion, kSettings};
+    return {kBack, kThemeSystem, kThemeLight, kThemeDark};
+}
+
+void ResetInteraction() {
+    g_app.hoverControl = kControlNone;
+    g_app.pressedControl = kControlNone;
+    g_app.focusControl = kControlNone;
+    g_app.keyboardFocus = false;
+}
+
+void SwitchView(MainView view) {
+    if (g_app.view == view) return;
+    g_app.view = view;
+    ResetInteraction();
+    if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
+}
+
+ThemeMode ThemeForControl(int control) {
+    if (control == kThemeLight) return ThemeMode::Light;
+    if (control == kThemeDark) return ThemeMode::Dark;
+    return ThemeMode::System;
+}
+
+const wchar_t* ThemeLabel(ThemeMode mode) {
+    switch (mode) {
+        case ThemeMode::Light:
+            return L"浅色";
+        case ThemeMode::Dark:
+            return L"深色";
+        default:
+            return L"跟随系统";
+    }
+}
+
+void DrawIconButton(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& rect, IconId icon, int control) {
+    const bool hovered = g_app.hoverControl == control;
+    const bool pressed = g_app.pressedControl == control;
+    const bool focused = IsFocused(control);
+
+    if (hovered || pressed || focused) {
+        SetBrushColor(g_app.brush.Get(),
+                      pressed ? g_app.palette.cardPressed : g_app.palette.cardHover);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 8.0f, 8.0f), g_app.brush.Get());
+    }
+    if (focused) {
+        SetBrushColor(g_app.brush.Get(), g_app.palette.accent);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 8.0f, 8.0f), g_app.brush.Get(), 1.5f);
+    }
+
+    const D2D1_RECT_F iconRect =
+        D2D1::RectF(rect.left + 7.0f, rect.top + 7.0f, rect.right - 7.0f, rect.bottom - 7.0f);
+    const D2D1_COLOR_F color =
+        hovered || pressed || focused ? g_app.palette.accent : g_app.palette.secondary;
+    DrawIcon(rt, icon, iconRect, color, g_app.brush.Get(), 1.35f);
+}
+
+void DrawTile(ID2D1HwndRenderTarget* rt, int index) {
+    const D2D1_RECT_F rect = kTileRects[index];
+    const bool hovered = g_app.hoverControl == index;
+    const bool pressed = g_app.pressedControl == index;
+    const bool focused = IsFocused(index);
 
     D2D1_COLOR_F fill = g_app.palette.card;
     if (pressed) {
@@ -105,104 +187,156 @@ void DrawCard(ID2D1HwndRenderTarget* rt, int index, bool keyboardFocused) {
     } else if (hovered) {
         fill = g_app.palette.cardHover;
     }
-
     SetBrushColor(g_app.brush.Get(), fill);
-    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 10.0f, 10.0f), g_app.brush.Get());
+    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 12.0f, 12.0f), g_app.brush.Get());
 
     SetBrushColor(g_app.brush.Get(),
-                  hovered || keyboardFocused ? g_app.palette.borderHover : g_app.palette.border);
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 10.0f, 10.0f), g_app.brush.Get(), 1.0f);
+                  hovered || focused ? g_app.palette.borderHover : g_app.palette.border);
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 12.0f, 12.0f), g_app.brush.Get(), 1.0f);
 
-    const float pad = 18.0f;
-    const D2D1_RECT_F badge =
-        D2D1::RectF(rect.left + pad, rect.top + pad, rect.left + pad + 44.0f, rect.top + pad + 44.0f);
+    const D2D1_RECT_F badge = D2D1::RectF(rect.left + 58.0f, rect.top + 24.0f,
+                                         rect.left + 110.0f, rect.top + 76.0f);
     SetBrushColor(g_app.brush.Get(),
-                  hovered ? g_app.palette.accentSoftHover : g_app.palette.accentSoft);
-    rt->FillRoundedRectangle(D2D1::RoundedRect(badge, 12.0f, 12.0f), g_app.brush.Get());
+                  hovered || focused ? g_app.palette.accentSoftHover : g_app.palette.accentSoft);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(badge, 14.0f, 14.0f), g_app.brush.Get());
 
     const IconId icon = index == 0 ? IconId::Screen : IconId::Region;
-    const D2D1_RECT_F iconRect = D2D1::RectF(badge.left + 9.0f, badge.top + 9.0f,
-                                            badge.right - 9.0f, badge.bottom - 9.0f);
-    DrawIcon(rt, icon, iconRect, g_app.palette.accent, g_app.brush.Get(), 1.6f);
-
-    SetBrushColor(g_app.brush.Get(),
-                  hovered ? g_app.palette.accent : g_app.palette.tertiary);
-    const D2D1_RECT_F chevron = D2D1::RectF(rect.right - 38.0f, rect.top + 24.0f,
-                                           rect.right - 22.0f, rect.top + 40.0f);
-    DrawIcon(rt, IconId::ChevronRight, chevron, hovered ? g_app.palette.accent : g_app.palette.tertiary,
-             g_app.brush.Get(), 1.5f);
+    DrawIcon(rt, icon,
+             D2D1::RectF(badge.left + 12.0f, badge.top + 12.0f, badge.right - 12.0f,
+                         badge.bottom - 12.0f),
+             g_app.palette.accent, g_app.brush.Get(), 1.6f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
     const std::wstring title = index == 0 ? L"全屏识别" : L"框选识别";
     DrawTextEx(rt, g_app.dwrite.Get(), title, g_app.fonts.cardTitle.Get(),
-               D2D1::RectF(rect.left + pad, rect.top + 76.0f, rect.right - pad, rect.top + 104.0f),
-               g_app.brush.Get(), TextAlign::Leading, true);
+               D2D1::RectF(rect.left + 10.0f, rect.top + 84.0f, rect.right - 10.0f,
+                           rect.top + 112.0f),
+               g_app.brush.Get(), TextAlign::Center, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
-    const std::wstring body = index == 0
-                                  ? L"扫描整个屏幕的二维码\n并选择要打开的网页"
-                                  : L"拖动框选屏幕区域\n识别后直接打开网页";
+    const std::wstring body = index == 0 ? L"扫描整个屏幕的二维码" : L"拖动选择屏幕区域";
     DrawTextEx(rt, g_app.dwrite.Get(), body, g_app.fonts.cardBody.Get(),
-               D2D1::RectF(rect.left + pad, rect.top + 106.0f, rect.right - pad,
-                           rect.top + 150.0f),
-               g_app.brush.Get(), TextAlign::Leading, false);
+               D2D1::RectF(rect.left + 10.0f, rect.top + 116.0f, rect.right - 10.0f,
+                           rect.top + 140.0f),
+               g_app.brush.Get(), TextAlign::Center, true, true);
 
-    if (keyboardFocused) {
+    if (focused) {
         const D2D1_RECT_F focusRect =
             D2D1::RectF(rect.left + 2.0f, rect.top + 2.0f, rect.right - 2.0f, rect.bottom - 2.0f);
         SetBrushColor(g_app.brush.Get(), g_app.palette.accent);
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(focusRect, 8.0f, 8.0f), g_app.brush.Get(), 2.0f);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(focusRect, 10.0f, 10.0f), g_app.brush.Get(),
+                                 2.0f);
     }
 }
 
-void DrawHeader(ID2D1HwndRenderTarget* rt) {
-    DrawAppLogo(rt, D2D1::RectF(kMargin, 22.0f, kMargin + 46.0f, 68.0f), g_app.brush.Get(), 12.0f);
+void DrawStatus(ID2D1HwndRenderTarget* rt) {
+    if (g_app.statusKind == AppState::StatusKind::None || g_app.status.empty()) return;
+
+    const D2D1_COLOR_F color = g_app.statusKind == AppState::StatusKind::Error
+                                   ? g_app.palette.danger
+                                   : g_app.palette.secondary;
+    SetBrushColor(g_app.brush.Get(), color);
+    DrawTextEx(rt, g_app.dwrite.Get(), g_app.status, g_app.fonts.footer.Get(),
+               D2D1::RectF(24.0f, 212.0f, 376.0f, 234.0f), g_app.brush.Get(),
+               TextAlign::Center, true, true);
+}
+
+void DrawHome(ID2D1HwndRenderTarget* rt) {
+    for (int i = 0; i < 2; ++i) DrawTile(rt, i);
+    DrawIconButton(rt, kSettingsRect, IconId::Settings, kSettings);
+    DrawStatus(rt);
+}
+
+void DrawThemeButton(ID2D1HwndRenderTarget* rt, int index) {
+    const int control = kThemeSystem + index;
+    const D2D1_RECT_F rect = kThemeRects[index];
+    const ThemeMode mode = static_cast<ThemeMode>(index);
+    const bool selected = g_app.themeMode == mode;
+    const bool hovered = g_app.hoverControl == control;
+    const bool pressed = g_app.pressedControl == control;
+    const bool focused = IsFocused(control);
+
+    D2D1_COLOR_F fill = g_app.palette.card;
+    if (selected) {
+        fill = g_app.palette.accentSoftHover;
+    } else if (pressed) {
+        fill = g_app.palette.cardPressed;
+    } else if (hovered) {
+        fill = g_app.palette.cardHover;
+    }
+    SetBrushColor(g_app.brush.Get(), fill);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 9.0f, 9.0f), g_app.brush.Get());
+
+    SetBrushColor(g_app.brush.Get(),
+                  selected || focused ? g_app.palette.accent
+                                      : (hovered ? g_app.palette.borderHover
+                                                 : g_app.palette.border));
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 9.0f, 9.0f), g_app.brush.Get(),
+                             selected || focused ? 1.4f : 1.0f);
+
+    SetBrushColor(g_app.brush.Get(),
+                  selected || hovered || focused ? g_app.palette.accent : g_app.palette.secondary);
+    DrawTextEx(rt, g_app.dwrite.Get(), ThemeLabel(mode), g_app.fonts.chip.Get(),
+               D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom), g_app.brush.Get(),
+               TextAlign::Center, true, true);
+
+    if (focused) {
+        const D2D1_RECT_F focusRect =
+            D2D1::RectF(rect.left + 2.0f, rect.top + 2.0f, rect.right - 2.0f, rect.bottom - 2.0f);
+        SetBrushColor(g_app.brush.Get(), g_app.palette.accent);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(focusRect, 7.0f, 7.0f), g_app.brush.Get(),
+                                 1.4f);
+    }
+}
+
+void DrawSettings(ID2D1HwndRenderTarget* rt) {
+    DrawIconButton(rt, kBackRect, IconId::ArrowLeft, kBack);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"EasyQR", g_app.fonts.appTitle.Get(),
-               D2D1::RectF(kMargin + 62.0f, 14.0f, 320.0f, 52.0f), g_app.brush.Get(),
-               TextAlign::Leading, true);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"设置", g_app.fonts.heading.Get(),
+               D2D1::RectF(56.0f, 10.0f, 300.0f, 42.0f), g_app.brush.Get(), TextAlign::Leading,
+               true);
 
-    SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"识别屏幕上的二维码，并在浏览器中打开", g_app.fonts.appSubtitle.Get(),
-               D2D1::RectF(kMargin + 63.0f, 50.0f, 500.0f, 72.0f), g_app.brush.Get(),
-               TextAlign::Leading, true);
-}
-
-void DrawFooter(ID2D1HwndRenderTarget* rt) {
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(kMargin, 288.0f), D2D1::Point2F(kClientWidth - kMargin, 288.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 54.0f), D2D1::Point2F(kClientWidth - 24.0f, 54.0f),
                  g_app.brush.Get(), 1.0f);
 
-    IconId icon = IconId::Shield;
-    D2D1_COLOR_F iconColor = g_app.palette.tertiary;
-    D2D1_COLOR_F textColor = g_app.palette.secondary;
-    std::wstring text = L"所有识别均在本机完成，不保存任何图像或数据";
+    SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"外观", g_app.fonts.label.Get(),
+               D2D1::RectF(24.0f, 64.0f, 200.0f, 84.0f), g_app.brush.Get(), TextAlign::Leading,
+               true);
 
-    if (g_app.statusKind == AppState::StatusKind::Info) {
-        icon = IconId::Check;
-        iconColor = g_app.palette.success;
-        textColor = g_app.palette.secondary;
-        text = g_app.status;
-    } else if (g_app.statusKind == AppState::StatusKind::Error) {
-        icon = IconId::Warning;
-        iconColor = g_app.palette.danger;
-        textColor = g_app.palette.danger;
-        text = g_app.status;
-    }
+    for (int i = 0; i < 3; ++i) DrawThemeButton(rt, i);
 
-    DrawIcon(rt, icon, D2D1::RectF(kMargin, 299.0f, kMargin + 15.0f, 314.0f), iconColor,
-             g_app.brush.Get(), 1.3f);
+    SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
+    rt->DrawLine(D2D1::Point2F(24.0f, 136.0f), D2D1::Point2F(kClientWidth - 24.0f, 136.0f),
+                 g_app.brush.Get(), 1.0f);
 
-    SetBrushColor(g_app.brush.Get(), textColor);
-    DrawTextEx(rt, g_app.dwrite.Get(), text, g_app.fonts.footer.Get(),
-               D2D1::RectF(kMargin + 22.0f, 296.0f, kClientWidth - 104.0f, 318.0f),
+    SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"关于", g_app.fonts.label.Get(),
+               D2D1::RectF(24.0f, 146.0f, 200.0f, 166.0f), g_app.brush.Get(), TextAlign::Leading,
+               true);
+
+    SetBrushColor(g_app.brush.Get(), g_app.palette.text);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"EasyQR " EASYQR_VERSION_STRING, g_app.fonts.label.Get(),
+               D2D1::RectF(24.0f, 168.0f, 260.0f, 188.0f), g_app.brush.Get(), TextAlign::Leading,
+               true);
+
+    SetBrushColor(g_app.brush.Get(), g_app.palette.tertiary);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"MIT License", g_app.fonts.footer.Get(),
+               D2D1::RectF(264.0f, 168.0f, 376.0f, 188.0f), g_app.brush.Get(),
+               TextAlign::Trailing, true);
+
+    SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"截图与识别数据仅在本机内存中处理，不保存任何数据。",
+               g_app.fonts.footer.Get(), D2D1::RectF(24.0f, 190.0f, 376.0f, 208.0f),
                g_app.brush.Get(), TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.tertiary);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"v" EASYQR_VERSION_STRING, g_app.fonts.footer.Get(),
-               D2D1::RectF(kClientWidth - 92.0f, 296.0f, kClientWidth - kMargin, 318.0f),
-               g_app.brush.Get(), TextAlign::Trailing, true);
+    DrawTextEx(rt, g_app.dwrite.Get(),
+               L"解码：ZXing-C++ + quirc  ·  主题设置仅本次运行有效", g_app.fonts.chipSmall.Get(),
+               D2D1::RectF(24.0f, 210.0f, 376.0f, 230.0f), g_app.brush.Get(),
+               TextAlign::Leading, true, true);
 }
 
 void PaintMainWindow(HWND hwnd) {
@@ -217,12 +351,11 @@ void PaintMainWindow(HWND hwnd) {
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
     rt->Clear(g_app.palette.page);
 
-    DrawHeader(rt);
-    const bool focused = GetFocus() == hwnd;
-    for (int i = 0; i < 2; ++i) {
-        DrawCard(rt, i, focused && g_app.focusCard == i);
+    if (g_app.view == MainView::Home) {
+        DrawHome(rt);
+    } else {
+        DrawSettings(rt);
     }
-    DrawFooter(rt);
 
     const HRESULT hr = rt->EndDraw();
     EndPaint(hwnd, &ps);
@@ -239,6 +372,27 @@ void CenterMainWindow(HWND hwnd, int width, int height) {
     const int x = work.left + ((work.right - work.left) - width) / 2;
     const int y = work.top + ((work.bottom - work.top) - height) / 2;
     SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void ActivateControl(int control) {
+    if (control == kFullScreen || control == kRegion) {
+        if (g_app.view != MainView::Home) return;
+        SetStatus(L"", AppState::StatusKind::None);
+        StartScan(control == kFullScreen ? ScanMode::Fullscreen : ScanMode::Region);
+        return;
+    }
+    if (control == kSettings) {
+        SwitchView(MainView::Settings);
+        return;
+    }
+    if (control == kBack) {
+        SwitchView(MainView::Home);
+        return;
+    }
+    if (control >= kThemeSystem && control <= kThemeDark) {
+        SetThemeMode(ThemeForControl(control));
+        g_app.focusControl = control;
+    }
 }
 
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -300,9 +454,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             const float scale = static_cast<float>(g_app.dpi) / 96.0f;
             const float x = static_cast<float>(GET_X_LPARAM(lParam)) / scale;
             const float y = static_cast<float>(GET_Y_LPARAM(lParam)) / scale;
-            const int card = HitTestCard(x, y);
-            if (card != g_app.hoverCard) {
-                g_app.hoverCard = card;
+            const int control = ControlAt(x, y);
+            if (control != g_app.hoverControl) {
+                g_app.hoverControl = control;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             TRACKMOUSEEVENT track{};
@@ -310,12 +464,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             track.dwFlags = TME_LEAVE;
             track.hwndTrack = hwnd;
             TrackMouseEvent(&track);
-            SetCursor(LoadCursorW(nullptr, card >= 0 ? IDC_HAND : IDC_ARROW));
+            SetCursor(LoadCursorW(nullptr, control >= 0 ? IDC_HAND : IDC_ARROW));
             return 0;
         }
         case WM_MOUSELEAVE:
-            if (g_app.hoverCard != -1) {
-                g_app.hoverCard = -1;
+            if (g_app.hoverControl != kControlNone) {
+                g_app.hoverControl = kControlNone;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -324,58 +478,84 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             const float scale = static_cast<float>(g_app.dpi) / 96.0f;
             const float x = static_cast<float>(GET_X_LPARAM(lParam)) / scale;
             const float y = static_cast<float>(GET_Y_LPARAM(lParam)) / scale;
-            const int card = HitTestCard(x, y);
-            if (card >= 0) {
-                g_app.pressedCard = card;
-                g_app.focusCard = card;
+            const int control = ControlAt(x, y);
+            if (control >= 0) {
+                g_app.keyboardFocus = false;
+                g_app.pressedControl = control;
+                g_app.focusControl = control;
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
         }
         case WM_LBUTTONUP: {
-            const bool wasPressed = g_app.pressedCard >= 0;
-            const int pressed = g_app.pressedCard;
-            g_app.pressedCard = -1;
+            const bool wasPressed = g_app.pressedControl >= 0;
+            const int pressed = g_app.pressedControl;
+            g_app.pressedControl = kControlNone;
             if (GetCapture() == hwnd) ReleaseCapture();
 
             const float scale = static_cast<float>(g_app.dpi) / 96.0f;
             const float x = static_cast<float>(GET_X_LPARAM(lParam)) / scale;
             const float y = static_cast<float>(GET_Y_LPARAM(lParam)) / scale;
-            const int card = HitTestCard(x, y);
+            const int control = ControlAt(x, y);
             InvalidateRect(hwnd, nullptr, FALSE);
 
-            if (wasPressed && card >= 0 && card == pressed) {
-                SetStatus(L"", AppState::StatusKind::None);
-                StartScan(card == 0 ? ScanMode::Fullscreen : ScanMode::Region);
+            if (wasPressed && control >= 0 && control == pressed) {
+                ActivateControl(control);
             }
             return 0;
         }
+        case WM_CAPTURECHANGED:
+            if (g_app.pressedControl != kControlNone) {
+                g_app.pressedControl = kControlNone;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
         case WM_SETCURSOR:
             if (LOWORD(lParam) == HTCLIENT) {
-                SetCursor(LoadCursorW(nullptr, g_app.hoverCard >= 0 ? IDC_HAND : IDC_ARROW));
+                SetCursor(LoadCursorW(nullptr, g_app.hoverControl >= 0 ? IDC_HAND : IDC_ARROW));
                 return TRUE;
             }
             break;
         case WM_KEYDOWN: {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const std::vector<int> order = FocusOrder();
+
+            if (wParam == VK_ESCAPE && g_app.view == MainView::Settings) {
+                SwitchView(MainView::Home);
+                return 0;
+            }
             if (wParam == VK_TAB) {
-                if (g_app.focusCard < 0) {
-                    g_app.focusCard = shift ? 1 : 0;
+                g_app.keyboardFocus = true;
+                int current = -1;
+                for (size_t i = 0; i < order.size(); ++i) {
+                    if (order[i] == g_app.focusControl) current = static_cast<int>(i);
+                }
+                if (current < 0) {
+                    g_app.focusControl = shift ? order.back() : order.front();
                 } else {
-                    g_app.focusCard = 1 - g_app.focusCard;
+                    const int count = static_cast<int>(order.size());
+                    const int next = (current + (shift ? count - 1 : 1)) % count;
+                    g_app.focusControl = order[static_cast<size_t>(next)];
                 }
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             if (wParam == VK_LEFT || wParam == VK_RIGHT) {
-                g_app.focusCard = wParam == VK_LEFT ? 0 : 1;
-                InvalidateRect(hwnd, nullptr, FALSE);
+                g_app.keyboardFocus = true;
+                if (g_app.view == MainView::Home) {
+                    g_app.focusControl = wParam == VK_LEFT ? kFullScreen : kRegion;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else {
+                    int selected = static_cast<int>(g_app.themeMode);
+                    selected = (selected + (wParam == VK_RIGHT ? 1 : 2)) % 3;
+                    SetThemeMode(static_cast<ThemeMode>(selected));
+                    g_app.focusControl = kThemeSystem + selected;
+                }
                 return 0;
             }
-            if ((wParam == VK_RETURN || wParam == VK_SPACE) && g_app.focusCard >= 0) {
-                SetStatus(L"", AppState::StatusKind::None);
-                StartScan(g_app.focusCard == 0 ? ScanMode::Fullscreen : ScanMode::Region);
+            if (wParam == VK_RETURN || wParam == VK_SPACE) {
+                if (g_app.focusControl >= 0) ActivateControl(g_app.focusControl);
                 return 0;
             }
             break;
@@ -385,18 +565,20 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         case WM_ACTIVATE:
-            if (LOWORD(wParam) == WA_INACTIVE) g_app.pressedCard = -1;
+            if (LOWORD(wParam) == WA_INACTIVE && g_app.pressedControl != kControlNone) {
+                g_app.pressedControl = kControlNone;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
-        case WM_DESTROY: {
+        case WM_DESTROY:
             DestroyOverlayForExit();
             g_app.hwnd = nullptr;
             DiscardRenderTarget();
             PostQuitMessage(0);
             return 0;
-        }
         default:
             break;
     }
@@ -414,15 +596,27 @@ void SetStatus(std::wstring text, AppState::StatusKind kind) {
 void ApplyWindowTheme(HWND hwnd, bool dark) {
     if (!hwnd) return;
     const BOOL useDark = dark ? TRUE : FALSE;
-    SetDwmAttribute(hwnd, 20, &useDark, sizeof(useDark));  // DWMWA_USE_IMMERSIVE_DARK_MODE
-    int backdrop = 2;                                      // DWMSBT_MAINWINDOW (Mica)
+    SetDwmAttribute(hwnd, 20, &useDark, sizeof(useDark));    // DWMWA_USE_IMMERSIVE_DARK_MODE
+    int backdrop = 2;                                        // DWMSBT_MAINWINDOW (Mica)
     SetDwmAttribute(hwnd, 38, &backdrop, sizeof(backdrop));  // DWMWA_SYSTEMBACKDROP_TYPE
     int corner = 2;                                          // DWMWCP_ROUND
     SetDwmAttribute(hwnd, 33, &corner, sizeof(corner));      // DWMWA_WINDOW_CORNER_PREFERENCE
 }
 
 void RefreshTheme() {
-    const bool dark = IsDarkThemePreferred();
+    g_app.systemDark = IsDarkThemePreferred();
+    if (g_app.themeMode != ThemeMode::System) return;
+
+    g_app.dark = g_app.systemDark;
+    g_app.palette = MakePalette(g_app.dark);
+    ApplyWindowTheme(g_app.hwnd, g_app.dark);
+    if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
+}
+
+void SetThemeMode(ThemeMode mode) {
+    g_app.themeMode = mode;
+    if (mode == ThemeMode::System) g_app.systemDark = IsDarkThemePreferred();
+    const bool dark = mode == ThemeMode::System ? g_app.systemDark : mode == ThemeMode::Dark;
     g_app.dark = dark;
     g_app.palette = MakePalette(dark);
     ApplyWindowTheme(g_app.hwnd, dark);
@@ -466,7 +660,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         return 1;
     }
 
-    g_app.dark = IsDarkThemePreferred();
+    g_app.systemDark = IsDarkThemePreferred();
+    g_app.themeMode = ThemeMode::System;
+    g_app.dark = g_app.systemDark;
     g_app.palette = MakePalette(g_app.dark);
 
     WNDCLASSEXW wc{};

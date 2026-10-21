@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(EasyQR VERSION 1.0.0 LANGUAGES C CXX)
+project(EasyQR VERSION 1.1.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "EasyQR targets Windows x64. Configure with -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw64.cmake")
@@ -12,6 +12,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MINGW)
     set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} --codepage=65001")
+endif()
+
+set(BUILD_READERS ON CACHE BOOL "" FORCE)
+set(BUILD_WRITERS OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_BLACKBOX_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_PYTHON_MODULE OFF CACHE BOOL "" FORCE)
+set(BUILD_C_API OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+add_subdirectory(vendor/zxing-cpp EXCLUDE_FROM_ALL)
+if(MINGW)
+    target_compile_options(ZXing PRIVATE -w -ffunction-sections -fdata-sections)
 endif()
 
 add_executable(EasyQR WIN32
@@ -70,6 +83,7 @@ target_link_libraries(EasyQR PRIVATE
     ole32
     uuid
     advapi32
+    ZXing
 )
 
 set_target_properties(EasyQR PROPERTIES OUTPUT_NAME "EasyQR")

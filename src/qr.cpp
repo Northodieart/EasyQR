@@ -1,8 +1,11 @@
 #include "qr.h"
 
+#include "ReadBarcode.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 
 extern "C" {
@@ -19,7 +22,53 @@ struct QuircDeleter {
     void operator()(quirc* q) const { quirc_destroy(q); }
 };
 
-std::vector<QrCode> DecodeOnce(const uint8_t* gray, int width, int height) {
+std::vector<QrCode> DecodeWithZXing(const uint8_t* gray, int width, int height) {
+    std::vector<QrCode> codes;
+    if (!gray || width < 1 || height < 1) return codes;
+
+    try {
+        const ZXing::ImageView image(gray, width, height, ZXing::ImageFormat::Lum);
+        const ZXing::ReaderOptions options = ZXing::ReaderOptions()
+                                                 .setFormats(ZXing::BarcodeFormat::QRCode)
+                                                 .setTryHarder(true)
+                                                 .setTryRotate(true)
+                                                 .setTryInvert(true)
+                                                 .setTryDownscale(true)
+                                                 .setMaxNumberOfSymbols(64);
+        const ZXing::Results results = ZXing::ReadBarcodes(image, options);
+
+        for (const ZXing::Result& result : results) {
+            if (!result.isValid()) continue;
+            const std::string payload = result.text();
+            if (payload.empty()) continue;
+
+            const ZXing::Position& position = result.position();
+            const int minX = std::min({position[0].x, position[1].x, position[2].x, position[3].x});
+            const int maxX = std::max({position[0].x, position[1].x, position[2].x, position[3].x});
+            const int minY = std::min({position[0].y, position[1].y, position[2].y, position[3].y});
+            const int maxY = std::max({position[0].y, position[1].y, position[2].y, position[3].y});
+            if (maxX - minX < 4 || maxY - minY < 4) continue;
+            if (maxX < 0 || maxY < 0 || minX >= width || minY >= height) continue;
+
+            QrCode code;
+            code.payload = payload;
+            for (int i = 0; i < 4; ++i) {
+                code.corners[i][0] = position[i].x;
+                code.corners[i][1] = position[i].y;
+            }
+            code.x = ClampTo(minX, 0, width - 1);
+            code.y = ClampTo(minY, 0, height - 1);
+            code.width = std::max(1, ClampTo(maxX, 0, width - 1) - code.x + 1);
+            code.height = std::max(1, ClampTo(maxY, 0, height - 1) - code.y + 1);
+            codes.push_back(std::move(code));
+        }
+    } catch (const std::exception&) {
+        // A decode failure must never take down the UI; the quirc fallback still runs.
+    }
+    return codes;
+}
+
+std::vector<QrCode> DecodeWithQuirc(const uint8_t* gray, int width, int height) {
     std::vector<QrCode> codes;
     if (!gray || width < 1 || height < 1) return codes;
 
@@ -87,34 +136,39 @@ bool LooksLikeDuplicate(const QrCode& a, const QrCode& b) {
     return dx * dx + dy * dy <= limit * limit;
 }
 
-}  // namespace
-
-std::vector<QrCode> DecodeQrCodes(const uint8_t* gray, int width, int height) {
-    std::vector<QrCode> codes = DecodeOnce(gray, width, height);
-
-    if (codes.empty() && gray && width > 0 && height > 0) {
-        const size_t size = static_cast<size_t>(width) * static_cast<size_t>(height);
-        std::vector<uint8_t> inverted(size);
-        for (size_t i = 0; i < size; ++i) inverted[i] = static_cast<uint8_t>(255 - gray[i]);
-        codes = DecodeOnce(inverted.data(), width, height);
-    }
-
-    std::vector<QrCode> unique;
-    unique.reserve(codes.size());
-    for (QrCode& code : codes) {
+void AppendUnique(std::vector<QrCode>* destination, std::vector<QrCode>&& source) {
+    for (QrCode& code : source) {
         bool duplicate = false;
-        for (const QrCode& existing : unique) {
+        for (const QrCode& existing : *destination) {
             if (LooksLikeDuplicate(existing, code)) {
                 duplicate = true;
                 break;
             }
         }
-        if (!duplicate) unique.push_back(std::move(code));
+        if (!duplicate) destination->push_back(std::move(code));
+    }
+}
+
+}  // namespace
+
+std::vector<QrCode> DecodeQrCodes(const uint8_t* gray, int width, int height) {
+    if (!gray || width < 1 || height < 1) return {};
+
+    // ZXing handles stylized, small and multiple codes in one pass. quirc remains
+    // as a second opinion for the rare image ZXing's detector rejects.
+    std::vector<QrCode> codes = DecodeWithZXing(gray, width, height);
+    AppendUnique(&codes, DecodeWithQuirc(gray, width, height));
+
+    if (codes.empty()) {
+        const size_t size = static_cast<size_t>(width) * static_cast<size_t>(height);
+        std::vector<uint8_t> inverted(size);
+        for (size_t i = 0; i < size; ++i) inverted[i] = static_cast<uint8_t>(255 - gray[i]);
+        AppendUnique(&codes, DecodeWithQuirc(inverted.data(), width, height));
     }
 
-    std::sort(unique.begin(), unique.end(), [](const QrCode& a, const QrCode& b) {
+    std::sort(codes.begin(), codes.end(), [](const QrCode& a, const QrCode& b) {
         return static_cast<long long>(a.width) * a.height >
                static_cast<long long>(b.width) * b.height;
     });
-    return unique;
+    return codes;
 }

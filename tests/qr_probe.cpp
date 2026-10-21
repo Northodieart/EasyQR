@@ -1,5 +1,6 @@
 #include "qr.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -70,6 +71,10 @@ int main(int argc, char** argv) {
     }
 
     const std::vector<QrCode> codes = DecodeQrCodes(pixels.data(), width, height);
-    for (const QrCode& code : codes) std::printf("%s\n", code.payload.c_str());
+    std::vector<std::string> payloads;
+    payloads.reserve(codes.size());
+    for (const QrCode& code : codes) payloads.push_back(code.payload);
+    std::sort(payloads.begin(), payloads.end());
+    for (const std::string& payload : payloads) std::printf("%s\n", payload.c_str());
     return 0;
 }

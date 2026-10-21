@@ -26,12 +26,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Northodieart"
             VALUE "FileDescription", "EasyQR 屏幕二维码识别"
-            VALUE "FileVersion", "1.0.0"
+            VALUE "FileVersion", EASYQR_VERSION_ASCII
             VALUE "InternalName", "EasyQR"
             VALUE "LegalCopyright", "Copyright (c) 2026 Northodieart"
             VALUE "OriginalFilename", "EasyQR.exe"
             VALUE "ProductName", "EasyQR"
-            VALUE "ProductVersion", "1.0.0"
+            VALUE "ProductVersion", EASYQR_VERSION_ASCII
         END
     END
     BLOCK "VarFileInfo"

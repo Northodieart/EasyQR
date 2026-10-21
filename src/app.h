@@ -2,12 +2,18 @@
 
 #include "render.h"
 
+enum class ThemeMode { System, Light, Dark };
+enum class MainView { Home, Settings };
+
 struct AppState {
     enum class StatusKind { None, Info, Error };
 
     HINSTANCE instance = nullptr;
     HWND hwnd = nullptr;
+    bool systemDark = false;
     bool dark = false;
+    ThemeMode themeMode = ThemeMode::System;
+    MainView view = MainView::Home;
     Palette palette{};
     FontSet fonts{};
 
@@ -17,9 +23,10 @@ struct AppState {
     ComPtr<ID2D1SolidColorBrush> brush;
 
     UINT dpi = 96;
-    int hoverCard = -1;
-    int pressedCard = -1;
-    int focusCard = -1;
+    int hoverControl = -1;
+    int pressedControl = -1;
+    int focusControl = -1;
+    bool keyboardFocus = false;
 
     StatusKind statusKind = StatusKind::None;
     std::wstring status;
@@ -28,5 +35,6 @@ struct AppState {
 extern AppState g_app;
 
 void RefreshTheme();
+void SetThemeMode(ThemeMode mode);
 void ApplyWindowTheme(HWND hwnd, bool dark);
 void SetStatus(std::wstring text, AppState::StatusKind kind);

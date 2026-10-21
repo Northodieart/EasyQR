@@ -85,8 +85,8 @@ bool CreateFonts(IDWriteFactory* factory, FontSet* fonts) {
     const std::wstring text = PickFamily(factory, L"Segoe UI Variable Text", L"Segoe UI");
     const std::wstring display = PickFamily(factory, L"Segoe UI Variable Display", text.c_str());
 
-    return MakeFormat(factory, display, 27.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fonts->appTitle) &&
-           MakeFormat(factory, text, 13.0f, DWRITE_FONT_WEIGHT_NORMAL, &fonts->appSubtitle) &&
+    return MakeFormat(factory, display, 20.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fonts->heading) &&
+           MakeFormat(factory, text, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fonts->label) &&
            MakeFormat(factory, text, 17.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fonts->cardTitle) &&
            MakeFormat(factory, text, 12.5f, DWRITE_FONT_WEIGHT_NORMAL, &fonts->cardBody) &&
            MakeFormat(factory, text, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, &fonts->footer) &&
@@ -222,31 +222,24 @@ void DrawIcon(ID2D1RenderTarget* target, IconId icon, const D2D1_RECT_F& rect,
             line(9.3f, 12.0f, 14.7f, 12.0f);
             dot(12.0f, 12.0f, 0.9f);
             break;
-        case IconId::Shield:
-            line(12.0f, 2.6f, 20.0f, 5.5f);
-            line(20.0f, 5.5f, 20.0f, 10.8f);
-            line(20.0f, 10.8f, 12.0f, 21.3f);
-            line(12.0f, 21.3f, 4.0f, 10.8f);
-            line(4.0f, 10.8f, 4.0f, 5.5f);
-            line(4.0f, 5.5f, 12.0f, 2.6f);
-            line(8.4f, 11.8f, 10.9f, 14.3f);
-            line(10.9f, 14.3f, 15.6f, 8.9f);
-            break;
         case IconId::Warning:
-        case IconId::Info:
-        case IconId::Check:
             target->DrawEllipse(D2D1::Ellipse(Pt(rect, 12.0f, 12.0f, unit), 9.2f * unit, 9.2f * unit),
                                 brush, sw, style);
-            if (icon == IconId::Warning) {
-                line(12.0f, 7.2f, 12.0f, 13.0f);
-                dot(12.0f, 16.7f, 0.95f);
-            } else if (icon == IconId::Info) {
-                dot(12.0f, 7.6f, 0.95f);
-                line(12.0f, 11.0f, 12.0f, 16.8f);
-            } else {
-                line(7.6f, 12.2f, 10.6f, 15.2f);
-                line(10.6f, 15.2f, 16.5f, 8.8f);
-            }
+            line(12.0f, 7.2f, 12.0f, 13.0f);
+            dot(12.0f, 16.7f, 0.95f);
+            break;
+        case IconId::Settings:
+            line(3.4f, 7.0f, 20.6f, 7.0f);
+            line(3.4f, 12.0f, 20.6f, 12.0f);
+            line(3.4f, 17.0f, 20.6f, 17.0f);
+            dot(8.0f, 7.0f, 2.2f);
+            dot(16.2f, 12.0f, 2.2f);
+            dot(10.8f, 17.0f, 2.2f);
+            break;
+        case IconId::ArrowLeft:
+            line(19.0f, 12.0f, 6.0f, 12.0f);
+            line(11.0f, 6.5f, 5.5f, 12.0f);
+            line(5.5f, 12.0f, 11.0f, 17.5f);
             break;
         case IconId::Link:
             arc(3.4f, 8.8f, 14.6f, 20.0f, 1.5f);
@@ -263,59 +256,6 @@ void DrawIcon(ID2D1RenderTarget* target, IconId icon, const D2D1_RECT_F& rect,
             line(18.0f, 12.0f, 21.2f, 12.0f);
             dot(12.0f, 12.0f, 0.8f);
             break;
-        case IconId::ChevronRight:
-            line(9.2f, 4.8f, 16.4f, 12.0f);
-            line(16.4f, 12.0f, 9.2f, 19.2f);
-            break;
     }
 }
 
-void DrawAppLogo(ID2D1RenderTarget* target, const D2D1_RECT_F& rect,
-                 ID2D1SolidColorBrush* brush, float radius) {
-    if (!target || !brush) return;
-    const D2D1_COLOR_F brand = Rgb(0x0067C0);
-    SetBrushColor(brush, brand);
-    target->FillRoundedRectangle(
-        D2D1::RoundedRect(rect, radius, radius), brush);
-
-    const float size = std::min(RectWidth(rect), RectHeight(rect));
-    const float unit = size / 46.0f;
-    const D2D1_COLOR_F white = Rgb(0xFFFFFF);
-
-    auto finder = [&](float x, float y) {
-        SetBrushColor(brush, white);
-        target->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(rect.left + x * unit, rect.top + y * unit,
-                                          rect.left + (x + 14.0f) * unit, rect.top + (y + 14.0f) * unit),
-                              3.0f * unit, 3.0f * unit),
-            brush);
-        SetBrushColor(brush, brand);
-        target->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(rect.left + (x + 2.0f) * unit, rect.top + (y + 2.0f) * unit,
-                                          rect.left + (x + 12.0f) * unit, rect.top + (y + 12.0f) * unit),
-                              1.8f * unit, 1.8f * unit),
-            brush);
-        SetBrushColor(brush, white);
-        target->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(rect.left + (x + 4.5f) * unit, rect.top + (y + 4.5f) * unit,
-                                          rect.left + (x + 9.5f) * unit, rect.top + (y + 9.5f) * unit),
-                              1.0f * unit, 1.0f * unit),
-            brush);
-    };
-
-    finder(9.0f, 9.0f);
-    finder(23.0f, 9.0f);
-    finder(9.0f, 23.0f);
-
-    SetBrushColor(brush, white);
-    target->FillRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(rect.left + 24.0f * unit, rect.top + 24.0f * unit,
-                                      rect.left + 36.0f * unit, rect.top + 36.0f * unit),
-                          1.6f * unit, 1.6f * unit),
-        brush);
-    SetBrushColor(brush, brand);
-    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.left + 30.0f * unit,
-                                                   rect.top + 30.0f * unit),
-                                      2.0f * unit, 2.0f * unit),
-                        brush);
-}

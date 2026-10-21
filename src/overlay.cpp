@@ -307,9 +307,10 @@ void DestroyOverlayWindow() {
 
 void RestoreMainWindow(bool activate) {
     if (!g_app.hwnd) return;
-    g_app.hoverCard = -1;
-    g_app.pressedCard = -1;
-    g_app.focusCard = -1;
+    g_app.hoverControl = -1;
+    g_app.pressedControl = -1;
+    g_app.focusControl = -1;
+    g_app.keyboardFocus = false;
     ShowWindow(g_app.hwnd, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
     if (activate) {
         SetForegroundWindow(g_app.hwnd);
@@ -870,8 +871,9 @@ RECT PrimaryMonitorRectRelativeTo(const ScreenFrame& frame) {
 void StartScan(ScanMode mode) {
     if (g_overlayState || !g_app.hwnd) return;
 
-    g_app.hoverCard = -1;
-    g_app.pressedCard = -1;
+    g_app.hoverControl = -1;
+    g_app.pressedControl = -1;
+    g_app.keyboardFocus = false;
 
     ShowWindow(g_app.hwnd, SW_HIDE);
     DwmFlush();
