@@ -247,6 +247,12 @@ void DrawIcon(ID2D1RenderTarget* target, IconId icon, const D2D1_RECT_F& rect,
             line(20.6f, 3.4f, 20.6f, 12.0f);
             line(20.6f, 3.4f, 11.0f, 13.0f);
             break;
+        case IconId::Info:
+            target->DrawEllipse(D2D1::Ellipse(Pt(rect, 12.0f, 12.0f, unit), 9.2f * unit, 9.2f * unit),
+                                brush, sw, style);
+            dot(12.0f, 7.6f, 0.95f);
+            line(12.0f, 11.0f, 12.0f, 16.8f);
+            break;
         case IconId::Crosshair:
             target->DrawEllipse(D2D1::Ellipse(Pt(rect, 12.0f, 12.0f, unit), 5.4f * unit, 5.4f * unit),
                                 brush, sw, style);

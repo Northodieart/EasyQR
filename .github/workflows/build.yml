@@ -28,9 +28,9 @@ jobs:
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: EasyQR-1.1.1-x64
+          name: EasyQR-1.2.0-x64
           path: |
             dist/EasyQR.exe
-            dist/EasyQR-1.1.1-x64-portable.zip
-            dist/EasyQR-1.1.1-x64-setup.exe
+            dist/EasyQR-1.2.0-x64-portable.zip
+            dist/EasyQR-1.2.0-x64-setup.exe
             dist/SHA256SUMS.txt

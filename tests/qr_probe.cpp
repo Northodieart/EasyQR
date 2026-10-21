@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -35,10 +36,11 @@ bool ReadToken(std::istream& in, std::string* token) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::fprintf(stderr, "usage: qr_probe <image.pgm>\n");
+    if (argc != 2 && argc != 3) {
+        std::fprintf(stderr, "usage: qr_probe <image.pgm> [--verbose]\n");
         return 2;
     }
+    const bool verbose = argc == 3 && std::strcmp(argv[2], "--verbose") == 0;
 
     std::ifstream file(argv[1], std::ios::binary);
     if (!file) {
@@ -71,6 +73,12 @@ int main(int argc, char** argv) {
     }
 
     const std::vector<QrCode> codes = DecodeQrCodes(pixels.data(), width, height);
+    if (verbose) {
+        for (const QrCode& code : codes) {
+            std::fprintf(stderr, "%s %dx%d+%d+%d\n", code.format.c_str(), code.width, code.height,
+                         code.x, code.y);
+        }
+    }
     std::vector<std::string> payloads;
     payloads.reserve(codes.size());
     for (const QrCode& code : codes) payloads.push_back(code.payload);

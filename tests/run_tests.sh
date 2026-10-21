@@ -25,6 +25,12 @@ check "$ROOT/tests/data/single.pgm" $'https://example.com/easyqr-test'
 check "$ROOT/tests/data/multi.pgm" $'https://example.com/register/form\nhttps://meeting.example.com/live/1\nhttps://meeting.example.com/live/2\nhttps://meeting.example.com/live/3\nhttps://meeting.example.com/live/4\nhttps://meeting.example.com/live/5'
 check "$ROOT/tests/data/stylized.pgm" $'https://www.koushare.com/live/20261021'
 check "$ROOT/tests/data/small.pgm" $'https://www.koushare.com/live/20261021'
+check "$ROOT/tests/data/code128.pgm" $'CODE-128-DEMO'
+check "$ROOT/tests/data/ean13.pgm" $'5901234123457'
+check "$ROOT/tests/data/datamatrix.pgm" $'DM-DEMO-123'
+check "$ROOT/tests/data/aztec.pgm" $'AZTEC-DEMO'
+check "$ROOT/tests/data/pdf417.pgm" $'PDF417-DEMO'
+check "$ROOT/tests/data/code39.pgm" $'CODE39-DEMO'
 check "$ROOT/tests/data/inverted.pgm" $'https://example.com/inverted'
 check "$ROOT/tests/data/no-qr.pgm" ""
 echo "all tests passed"

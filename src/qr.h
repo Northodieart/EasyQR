@@ -6,6 +6,7 @@
 
 struct QrCode {
     std::string payload;
+    std::string format;
     // Top-left, top-right, bottom-right, bottom-left, in image pixels.
     double corners[4][2] = {};
     int x = 0;

@@ -20,13 +20,13 @@ OutFile "${OUTPUT}"
 !endif
 
 !define APP_NAME "EasyQR"
-!define APP_VERSION "1.1.1"
+!define APP_VERSION "1.2.0"
 !define PUBLISHER "Northodieart"
 !define MAIN_CLASS "EasyQR.MainWindow"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\EasyQR"
 !define PRODUCT_KEY "Software\EasyQR"
 
-VIProductVersion "1.1.1.0"
+VIProductVersion "1.2.0.0"
 VIAddVersionKey "ProductName" "EasyQR"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey "FileDescription" "EasyQR 屏幕二维码识别安装程序"
@@ -117,7 +117,7 @@ Section "EasyQR（必需）" SecCore
     WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
     WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
     WriteRegDWORD HKLM "${UNINST_KEY}" "VersionMajor" 1
-    WriteRegDWORD HKLM "${UNINST_KEY}" "VersionMinor" 1
+    WriteRegDWORD HKLM "${UNINST_KEY}" "VersionMinor" 2
 
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
     IntFmt $0 "0x%08X" $0

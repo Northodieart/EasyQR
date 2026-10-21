@@ -235,7 +235,7 @@ void DrawTile(ID2D1HwndRenderTarget* rt, int index) {
                g_app.brush.Get(), TextAlign::Center, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
-    const std::wstring body = index == 0 ? L"扫描整个屏幕的二维码" : L"拖动选择屏幕区域";
+    const std::wstring body = index == 0 ? L"扫描二维码与条形码" : L"拖动选择屏幕区域";
     DrawTextEx(rt, g_app.dwrite.Get(), body, g_app.fonts.cardBody.Get(),
                D2D1::RectF(rect.left + 10.0f, rect.top + 116.0f, rect.right - 10.0f,
                            rect.top + 140.0f),

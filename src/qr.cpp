@@ -29,7 +29,7 @@ std::vector<QrCode> DecodeWithZXing(const uint8_t* gray, int width, int height) 
     try {
         const ZXing::ImageView image(gray, width, height, ZXing::ImageFormat::Lum);
         const ZXing::ReaderOptions options = ZXing::ReaderOptions()
-                                                 .setFormats(ZXing::BarcodeFormat::QRCode)
+                                                 .setFormats(ZXing::BarcodeFormat::Any)
                                                  .setTryHarder(true)
                                                  .setTryRotate(true)
                                                  .setTryInvert(true)
@@ -45,13 +45,22 @@ std::vector<QrCode> DecodeWithZXing(const uint8_t* gray, int width, int height) 
             const ZXing::Position& position = result.position();
             const int minX = std::min({position[0].x, position[1].x, position[2].x, position[3].x});
             const int maxX = std::max({position[0].x, position[1].x, position[2].x, position[3].x});
-            const int minY = std::min({position[0].y, position[1].y, position[2].y, position[3].y});
-            const int maxY = std::max({position[0].y, position[1].y, position[2].y, position[3].y});
-            if (maxX - minX < 4 || maxY - minY < 4) continue;
+            int minY = std::min({position[0].y, position[1].y, position[2].y, position[3].y});
+            int maxY = std::max({position[0].y, position[1].y, position[2].y, position[3].y});
+            if (maxX - minX < 4) continue;
             if (maxX < 0 || maxY < 0 || minX >= width || minY >= height) continue;
+
+            // 1D flags have a line-like position (zero height); give them a small
+            // virtual box so the overlay can place and highlight a result button.
+            if (maxY - minY < 4) {
+                const int centerY = (minY + maxY) / 2;
+                minY = centerY - 8;
+                maxY = centerY + 8;
+            }
 
             QrCode code;
             code.payload = payload;
+            code.format = ZXing::ToString(result.format());
             for (int i = 0; i < 4; ++i) {
                 code.corners[i][0] = position[i].x;
                 code.corners[i][1] = position[i].y;
@@ -97,6 +106,7 @@ std::vector<QrCode> DecodeWithQuirc(const uint8_t* gray, int width, int height) 
         QrCode result;
         result.payload.assign(reinterpret_cast<const char*>(data.payload),
                               static_cast<size_t>(data.payload_len));
+        result.format = "QRCode";
 
         double min_x = 1e18;
         double min_y = 1e18;

@@ -20,7 +20,10 @@ constexpr UINT_PTR kAutoOpenTimer = 1;
 struct OverlayHit {
     RECT qrPx{};
     std::wstring url;
+    std::wstring payload;
+    std::wstring format;
     std::wstring label;
+    bool isWeb = false;
     D2D1_RECT_F pill{};
 };
 
@@ -48,6 +51,17 @@ struct OverlayState {
     bool trackingMouse = false;
     bool releasingCapture = false;
 
+    int resultHit = -1;
+    bool resultFromChooser = false;
+    bool resultCopied = false;
+    bool resultCopyFailed = false;
+    int resultHover = -1;
+    int resultPressed = -1;
+    std::wstring resultText;
+    D2D1_RECT_F resultCard{};
+    D2D1_RECT_F copyButton{};
+    D2D1_RECT_F backButton{};
+
     ComPtr<ID2D1HwndRenderTarget> rt;
     ComPtr<ID2D1Bitmap> bitmap;
     ComPtr<ID2D1SolidColorBrush> brush;
@@ -62,6 +76,69 @@ const D2D1_COLOR_F kOverlayWhite = Rgb(0xFFFFFF);
 const D2D1_COLOR_F kOverlaySecondary = Rgba(0.88f, 0.88f, 0.88f, 1.0f);
 const D2D1_COLOR_F kOverlayTertiary = Rgba(0.64f, 0.64f, 0.64f, 1.0f);
 const D2D1_COLOR_F kOverlayDanger = Rgb(0xFFB4AB);
+const D2D1_COLOR_F kOverlaySuccess = Rgb(0x8FE6A0);
+
+std::wstring FormatTitle(const std::wstring& format) {
+    if (format == L"QRCode") return L"QR Code";
+    if (format == L"MicroQRCode") return L"Micro QR Code";
+    if (format == L"RMQRCode" || format == L"rMQRCode") return L"rMQR Code";
+    if (format == L"DataMatrix") return L"Data Matrix";
+    if (format == L"DataBarExpanded") return L"DataBar Expanded";
+    if (format == L"EAN13") return L"EAN-13";
+    if (format == L"EAN8") return L"EAN-8";
+    if (format == L"UPCA") return L"UPC-A";
+    if (format == L"UPCE") return L"UPC-E";
+    if (format == L"Code39") return L"Code 39";
+    if (format == L"Code93") return L"Code 93";
+    if (format == L"Code128") return L"Code 128";
+    return format.empty() ? L"未知格式" : format;
+}
+
+std::wstring FormatCategory(const std::wstring& format) {
+    if (format == L"QRCode" || format == L"MicroQRCode" || format == L"RMQRCode" ||
+        format == L"rMQRCode") {
+        return L"二维码";
+    }
+    if (format == L"DataMatrix" || format == L"Aztec" || format == L"PDF417" ||
+        format == L"MaxiCode") {
+        return L"二维条码";
+    }
+    return L"条形码";
+}
+
+std::wstring SanitizeForDisplay(const std::wstring& text) {
+    std::wstring out;
+    out.reserve(text.size());
+    for (wchar_t c : text) {
+        if (c == L'\r') continue;
+        if (c == L'\n') {
+            out.push_back(L'\n');
+        } else if (c == L'\t') {
+            out.push_back(L' ');
+        } else if (c < 0x20 || c == 0x7f) {
+            out.push_back(L' ');
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+std::wstring PreviewText(const std::wstring& text, size_t maxLength = 28) {
+    const std::wstring clean = SanitizeForDisplay(text);
+    std::wstring preview;
+    preview.reserve(std::min(clean.size(), maxLength) + 1);
+    for (wchar_t c : clean) {
+        if (preview.size() >= maxLength) break;
+        if (c == L'\n') {
+            if (!preview.empty() && preview.back() != L' ') preview.push_back(L' ');
+        } else {
+            preview.push_back(c);
+        }
+    }
+    if (clean.size() > maxLength) preview += L"…";
+    return preview;
+}
 
 D2D1_RECT_F DipRect(const RECT& px, float scale) {
     return D2D1::RectF(px.left / scale, px.top / scale, px.right / scale, px.bottom / scale);
@@ -189,7 +266,8 @@ void DrawPills(ID2D1RenderTarget* rt, OverlayState* state) {
         const D2D1_RECT_F iconRect =
             D2D1::RectF(hit.pill.left + 12.0f, hit.pill.top + (kPillHeight - 15.0f) * 0.5f,
                         hit.pill.left + 27.0f, hit.pill.top + (kPillHeight + 15.0f) * 0.5f);
-        DrawIcon(rt, IconId::Link, iconRect, kOverlayWhite, state->brush.Get(), 1.25f);
+        DrawIcon(rt, hit.isWeb ? IconId::Link : IconId::Info, iconRect, kOverlayWhite,
+                 state->brush.Get(), 1.25f);
 
         SetBrushColor(state->brush.Get(), kOverlayWhite);
         DrawTextEx(rt, g_app.dwrite.Get(), hit.label, g_app.fonts.pill.Get(),
@@ -200,6 +278,11 @@ void DrawPills(ID2D1RenderTarget* rt, OverlayState* state) {
 }
 
 void OpenHitAndClose(const OverlayHit& hit);
+void DisplayResult(OverlayState* state, int index, bool fromChooser);
+void CloseResultPanel(OverlayState* state);
+void CopyCurrentResult(OverlayState* state);
+int ResultButtonAt(const OverlayState& state, float x, float y);
+void DrawResultPanel(ID2D1RenderTarget* rt, OverlayState& state);
 
 void AutoOpenSingle() {
     if (!g_overlayState || !g_overlayState->singleAuto || g_overlayState->hits.empty()) return;
@@ -214,7 +297,9 @@ void UpdateCursor(HWND hwnd) {
     }
     const OverlayState& state = *g_overlayState;
     LPCTSTR cursor = IDC_ARROW;
-    if (state.message) {
+    if (state.resultHit >= 0) {
+        cursor = state.resultHover >= 0 ? IDC_HAND : IDC_ARROW;
+    } else if (state.message) {
         cursor = IDC_ARROW;
     } else if (!state.hits.empty()) {
         cursor = state.hover >= 0 ? IDC_HAND : IDC_ARROW;
@@ -250,28 +335,33 @@ void LayoutPills(OverlayState* state) {
     }
 }
 
-void BuildHits(OverlayState* state, const std::vector<QrCode>& codes, int offsetX, int offsetY,
-               bool* sawQr, bool* sawNonWeb) {
-    *sawQr = !codes.empty();
-    *sawNonWeb = false;
+void BuildHits(OverlayState* state, const std::vector<QrCode>& codes, int offsetX, int offsetY) {
     for (const QrCode& code : codes) {
-        WebUrl web;
-        if (!TryMakeWebUrl(code.payload, &web)) {
-            *sawNonWeb = true;
-            continue;
-        }
         OverlayHit hit;
         hit.qrPx.left = offsetX + code.x;
         hit.qrPx.top = offsetY + code.y;
         hit.qrPx.right = offsetX + code.x + code.width;
         hit.qrPx.bottom = offsetY + code.y + code.height;
-        hit.url = Utf8ToWide(web.url);
-        hit.label = Utf8ToWide(web.display);
-        if (hit.url.empty() || hit.label.empty()) continue;
+        hit.payload = Utf8ToWide(code.payload);
+        hit.format = Utf8ToWide(code.format.empty() ? "QRCode" : code.format);
+        if (hit.payload.empty()) continue;
+
+        WebUrl web;
+        if (TryMakeWebUrl(code.payload, &web)) {
+            hit.isWeb = true;
+            hit.url = Utf8ToWide(web.url);
+            hit.label = Utf8ToWide(web.display);
+            if (hit.url.empty() || hit.label.empty()) continue;
+        } else {
+            hit.isWeb = false;
+            hit.label = FormatCategory(hit.format);
+            const std::wstring preview = PreviewText(hit.payload);
+            if (!preview.empty()) hit.label += L" · " + preview;
+        }
 
         bool duplicate = false;
         for (const OverlayHit& existing : state->hits) {
-            if (existing.url == hit.url &&
+            if (existing.payload == hit.payload &&
                 std::abs(existing.qrPx.left - hit.qrPx.left) < 4 &&
                 std::abs(existing.qrPx.top - hit.qrPx.top) < 4) {
                 duplicate = true;
@@ -290,6 +380,9 @@ void FreeGray(OverlayState* state) {
 void ShowMessage(OverlayState* state, const std::wstring& title, const std::wstring& body,
                  const std::wstring& status) {
     state->message = true;
+    state->singleAuto = false;
+    state->resultHit = -1;
+    state->resultFromChooser = false;
     state->messageTitle = title;
     state->messageBody = body;
     state->messageHint = L"点击任意位置或按 Esc 返回";
@@ -350,31 +443,248 @@ void OpenHitAndClose(const OverlayHit& hit) {
     RestoreMainWindow(false);
 }
 
-void PrepareFullscreenResults(OverlayState* state) {
-    state->hits.clear();
-    state->message = false;
+void LayoutResultPanel(OverlayState* state) {
+    const float screenWidth = state->frame.width / state->uiScale;
+    const float screenHeight = state->frame.height / state->uiScale;
+    const float centerX =
+        (state->primaryPx.left + state->primaryPx.right) * 0.5f / state->uiScale;
+    const float centerY =
+        (state->primaryPx.top + state->primaryPx.bottom) * 0.5f / state->uiScale;
+    const float cardWidth = std::min(560.0f, screenWidth - 32.0f);
+    const float cardHeight = std::min(320.0f, screenHeight - 32.0f);
+    float left = centerX - cardWidth * 0.5f;
+    float top = centerY - cardHeight * 0.5f;
+    left = std::max(16.0f, std::min(left, screenWidth - cardWidth - 16.0f));
+    top = std::max(16.0f, std::min(top, screenHeight - cardHeight - 16.0f));
+    state->resultCard =
+        D2D1::RectF(left, top, left + cardWidth, top + cardHeight);
 
-    bool sawQr = false;
-    bool sawNonWeb = false;
-    const std::vector<QrCode> codes =
-        DecodeQrCodes(state->frame.gray.data(), state->frame.width, state->frame.height);
-    BuildHits(state, codes, 0, 0, &sawQr, &sawNonWeb);
-    FreeGray(state);
+    const float margin = 24.0f;
+    const float buttonHeight = 38.0f;
+    const float copyWidth = 132.0f;
+    const float backWidth = 112.0f;
+    const float gap = 12.0f;
+    state->copyButton = D2D1::RectF(state->resultCard.right - margin - copyWidth,
+                                    state->resultCard.bottom - margin - buttonHeight,
+                                    state->resultCard.right - margin,
+                                    state->resultCard.bottom - margin);
+    state->backButton = D2D1::RectF(state->copyButton.left - gap - backWidth,
+                                    state->copyButton.top, state->copyButton.left - gap,
+                                    state->copyButton.bottom);
+}
 
-    if (state->hits.empty()) {
-        if (sawNonWeb) {
-            ShowMessage(state, L"无法打开此二维码", L"二维码内容不是网页链接，EasyQR 已阻止打开",
-                        L"二维码内容不是网页链接。");
-        } else {
-            ShowMessage(state, L"未识别到二维码", L"请将二维码完整、清晰地显示在屏幕上",
-                        L"未识别到二维码。");
+int ResultButtonAt(const OverlayState& state, float x, float y) {
+    if (state.resultHit < 0) return -1;
+    if (PointInRect(state.copyButton, x, y)) return 0;
+    if (PointInRect(state.backButton, x, y)) return 1;
+    return -1;
+}
+
+void DisplayResult(OverlayState* state, int index, bool fromChooser) {
+    if (!state || index < 0 || index >= static_cast<int>(state->hits.size())) return;
+    state->resultHit = index;
+    state->resultFromChooser = fromChooser;
+    state->resultCopied = false;
+    state->resultCopyFailed = false;
+    state->resultHover = -1;
+    state->resultPressed = -1;
+    state->hover = -1;
+    state->resultText = SanitizeForDisplay(state->hits[static_cast<size_t>(index)].payload);
+    LayoutResultPanel(state);
+    if (g_overlayHwnd) {
+        UpdateCursor(g_overlayHwnd);
+        InvalidateRect(g_overlayHwnd, nullptr, FALSE);
+    }
+}
+
+bool CopyTextToClipboard(const std::wstring& text) {
+    if (!OpenClipboard(nullptr)) return false;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) {
+        CloseClipboard();
+        return false;
+    }
+    void* destination = GlobalLock(memory);
+    if (!destination) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    std::memcpy(destination, text.c_str(), bytes);
+    GlobalUnlock(memory);
+    if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
+
+void CopyCurrentResult(OverlayState* state) {
+    if (!state || state->resultHit < 0 ||
+        state->resultHit >= static_cast<int>(state->hits.size())) {
+        return;
+    }
+    const std::wstring& payload = state->hits[static_cast<size_t>(state->resultHit)].payload;
+    if (CopyTextToClipboard(payload)) {
+        state->resultCopied = true;
+        state->resultCopyFailed = false;
+        SetStatus(L"已复制到剪贴板。", AppState::StatusKind::Info);
+    } else {
+        state->resultCopied = false;
+        state->resultCopyFailed = true;
+    }
+    if (g_overlayHwnd) InvalidateRect(g_overlayHwnd, nullptr, FALSE);
+}
+
+void CloseResultPanel(OverlayState* state) {
+    if (!state) return;
+    if (state->resultFromChooser) {
+        state->resultHit = -1;
+        state->resultFromChooser = false;
+        state->resultCopied = false;
+        state->resultCopyFailed = false;
+        state->resultHover = -1;
+        state->resultPressed = -1;
+        if (g_overlayHwnd) {
+            UpdateCursor(g_overlayHwnd);
+            InvalidateRect(g_overlayHwnd, nullptr, FALSE);
         }
         return;
     }
 
-    // A single code needs no chooser: show the marker, then open it automatically.
-    state->singleAuto = state->hits.size() == 1;
-    state->hover = -1;
+    DestroyOverlayWindow();
+    RestoreMainWindow(true);
+}
+
+void DrawResultPanel(ID2D1RenderTarget* rt, OverlayState& state) {
+    if (state.resultHit < 0 || state.resultHit >= static_cast<int>(state.hits.size())) return;
+    const OverlayHit& hit = state.hits[static_cast<size_t>(state.resultHit)];
+    const D2D1_RECT_F card = state.resultCard;
+
+    FillRounded(rt, state.brush.Get(),
+                D2D1::RectF(card.left + 2.0f, card.top + 7.0f, card.right - 2.0f,
+                            card.bottom + 7.0f),
+                18.0f, Rgba(0.0f, 0.0f, 0.0f, 0.36f));
+    FillRounded(rt, state.brush.Get(), card, 16.0f, Rgba(0.072f, 0.072f, 0.078f, 0.97f));
+    StrokeRounded(rt, state.brush.Get(), card, 16.0f, Rgba(1.0f, 1.0f, 1.0f, 0.15f), 1.0f);
+
+    SetBrushColor(state.brush.Get(), kOverlayWhite);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"识别结果", g_app.fonts.messageTitle.Get(),
+               D2D1::RectF(card.left + 24.0f, card.top + 17.0f, card.right - 24.0f,
+                           card.top + 47.0f),
+               state.brush.Get(), TextAlign::Leading, true, true);
+
+    const std::wstring formatLine = FormatTitle(hit.format) + L" · " + FormatCategory(hit.format);
+    SetBrushColor(state.brush.Get(), kOverlayAccent);
+    DrawTextEx(rt, g_app.dwrite.Get(), formatLine, g_app.fonts.chip.Get(),
+               D2D1::RectF(card.left + 24.0f, card.top + 48.0f, card.right - 24.0f,
+                           card.top + 70.0f),
+               state.brush.Get(), TextAlign::Leading, true, true);
+
+    const D2D1_RECT_F contentBox = D2D1::RectF(card.left + 24.0f, card.top + 78.0f,
+                                               card.right - 24.0f, card.bottom - 74.0f);
+    FillRounded(rt, state.brush.Get(), contentBox, 10.0f, Rgba(1.0f, 1.0f, 1.0f, 0.055f));
+    StrokeRounded(rt, state.brush.Get(), contentBox, 10.0f, Rgba(1.0f, 1.0f, 1.0f, 0.07f), 1.0f);
+    SetBrushColor(state.brush.Get(), kOverlayWhite);
+    DrawTextEx(rt, g_app.dwrite.Get(),
+               state.resultText.empty() ? L"(空内容)" : state.resultText,
+               g_app.fonts.messageBody.Get(),
+               D2D1::RectF(contentBox.left + 14.0f, contentBox.top + 12.0f,
+                           contentBox.right - 14.0f, contentBox.bottom - 12.0f),
+               state.brush.Get(), TextAlign::Leading, false, false, true);
+
+    SetBrushColor(state.brush.Get(),
+                  state.resultCopyFailed ? kOverlayDanger
+                                         : (state.resultCopied ? kOverlaySuccess : kOverlayTertiary));
+    const std::wstring footer =
+        state.resultCopyFailed
+            ? L"复制失败，请重试"
+            : (state.resultCopied
+                   ? L"已复制到剪贴板"
+                   : (state.resultFromChooser ? L"可复制完整内容，Esc 返回"
+                                              : L"可复制完整内容，Esc 关闭"));
+    DrawTextEx(rt, g_app.dwrite.Get(), footer, g_app.fonts.chipSmall.Get(),
+               D2D1::RectF(card.left + 24.0f, card.bottom - 62.0f, card.right - 300.0f,
+                           card.bottom - 28.0f),
+               state.brush.Get(), TextAlign::Leading, true, true);
+
+    // Back / close button.
+    {
+        const bool hovered = state.resultHover == 1;
+        const bool pressed = state.resultPressed == 1;
+        const D2D1_COLOR_F fill = pressed ? Rgba(0.18f, 0.18f, 0.19f, 0.98f)
+                                         : (hovered ? Rgba(0.16f, 0.16f, 0.17f, 0.98f)
+                                                    : Rgba(0.11f, 0.11f, 0.12f, 0.98f));
+        FillRounded(rt, state.brush.Get(), state.backButton, 10.0f, fill);
+        StrokeRounded(rt, state.brush.Get(), state.backButton, 10.0f,
+                      hovered ? Rgba(1.0f, 1.0f, 1.0f, 0.32f) : Rgba(1.0f, 1.0f, 1.0f, 0.16f),
+                      1.0f);
+        SetBrushColor(state.brush.Get(), kOverlayWhite);
+        DrawTextEx(rt, g_app.dwrite.Get(), state.resultFromChooser ? L"返回" : L"关闭",
+                   g_app.fonts.pill.Get(), state.backButton, state.brush.Get(),
+                   TextAlign::Center, true, true);
+    }
+
+    // Copy button.
+    {
+        const bool hovered = state.resultHover == 0;
+        const bool pressed = state.resultPressed == 0;
+        D2D1_COLOR_F fill = pressed ? Rgb(0x0067C0) : Rgb(0x0078D4);
+        D2D1_COLOR_F border = hovered ? Rgba(1.0f, 1.0f, 1.0f, 0.45f)
+                                      : Rgba(1.0f, 1.0f, 1.0f, 0.22f);
+        D2D1_COLOR_F text = kOverlayWhite;
+        std::wstring label = L"复制内容";
+        if (state.resultCopied) {
+            fill = Rgba(0.16f, 0.25f, 0.18f, 0.98f);
+            border = Rgba(0.56f, 0.90f, 0.63f, 0.55f);
+            text = kOverlaySuccess;
+            label = L"已复制";
+        } else if (state.resultCopyFailed) {
+            fill = Rgba(0.22f, 0.12f, 0.12f, 0.98f);
+            border = Rgba(1.0f, 0.70f, 0.67f, 0.55f);
+            text = kOverlayDanger;
+            label = L"复制失败";
+        }
+        FillRounded(rt, state.brush.Get(), state.copyButton, 10.0f, fill);
+        StrokeRounded(rt, state.brush.Get(), state.copyButton, 10.0f, border, 1.0f);
+        SetBrushColor(state.brush.Get(), text);
+        DrawTextEx(rt, g_app.dwrite.Get(), label, g_app.fonts.pill.Get(), state.copyButton,
+                   state.brush.Get(), TextAlign::Center, true, true);
+    }
+}
+
+void PrepareFullscreenResults(OverlayState* state) {
+    state->hits.clear();
+    state->message = false;
+    state->singleAuto = false;
+    state->resultHit = -1;
+    state->resultFromChooser = false;
+
+    const std::vector<QrCode> codes =
+        DecodeQrCodes(state->frame.gray.data(), state->frame.width, state->frame.height);
+    BuildHits(state, codes, 0, 0);
+    FreeGray(state);
+
+    if (state->hits.empty()) {
+        ShowMessage(state, L"未识别到可识别内容",
+                    L"请将二维码或条形码完整、清晰地显示在屏幕上",
+                    L"未识别到可识别内容。");
+        return;
+    }
+
+    if (state->hits.size() == 1) {
+        if (state->hits.front().isWeb) {
+            state->singleAuto = true;
+        } else {
+            DisplayResult(state, 0, false);
+        }
+    } else {
+        state->hover = -1;
+    }
 }
 
 void FinalizeRegion(const RECT& selection) {
@@ -417,17 +727,25 @@ void FinalizeRegion(const RECT& selection) {
                     static_cast<size_t>(width));
     }
 
-    bool sawQr = false;
-    bool sawNonWeb = false;
     const std::vector<QrCode> codes = DecodeQrCodes(crop.data(), width, height);
     FreeGray(&state);
-    BuildHits(&state, codes, selection.left, selection.top, &sawQr, &sawNonWeb);
+    BuildHits(&state, codes, selection.left, selection.top);
     state.hasSelection = false;
     state.selecting = false;
+    state.resultHit = -1;
 
     if (state.hits.size() == 1) {
-        const OverlayHit hit = state.hits.front();
-        OpenHitAndClose(hit);
+        if (state.hits.front().isWeb) {
+            const OverlayHit hit = state.hits.front();
+            OpenHitAndClose(hit);
+        } else {
+            DisplayResult(&state, 0, false);
+            if (g_overlayHwnd) {
+                UpdateCursor(g_overlayHwnd);
+                InvalidateRect(g_overlayHwnd, nullptr, FALSE);
+                UpdateWindow(g_overlayHwnd);
+            }
+        }
         return;
     }
 
@@ -441,13 +759,9 @@ void FinalizeRegion(const RECT& selection) {
         return;
     }
 
-    if (sawNonWeb) {
-        ShowMessage(&state, L"无法打开此二维码", L"二维码内容不是网页链接，EasyQR 已阻止打开",
-                    L"二维码内容不是网页链接。");
-    } else {
-        ShowMessage(&state, L"未识别到二维码", L"请将二维码完整、清晰地框选在区域内",
-                    L"未识别到二维码。");
-    }
+    ShowMessage(&state, L"未识别到可识别内容",
+                L"请将内容完整、清晰地框选在区域内",
+                L"未识别到可识别内容。");
     if (g_overlayHwnd) {
         UpdateCursor(g_overlayHwnd);
         InvalidateRect(g_overlayHwnd, nullptr, FALSE);
@@ -519,7 +833,7 @@ void PaintOverlay(HWND hwnd) {
 
     const bool regionSelect = state.mode == ScanMode::Region && state.hits.empty() && !state.message;
     if (!state.singleAuto) {
-        const float dimAlpha = state.message ? 0.56f : (regionSelect ? 0.46f : 0.52f);
+        const float dimAlpha = state.message ? 0.56f : (regionSelect ? 0.46f : 0.54f);
         SetBrushColor(state.brush.Get(), Rgba(0.0f, 0.0f, 0.0f, dimAlpha));
         rt->FillRectangle(D2D1::RectF(0.0f, 0.0f, static_cast<float>(state.frame.width),
                                      static_cast<float>(state.frame.height)),
@@ -540,7 +854,9 @@ void PaintOverlay(HWND hwnd) {
 
     rt->SetTransform(D2D1::Matrix3x2F::Scale(state.uiScale, state.uiScale));
 
-    if (regionSelect) {
+    if (state.resultHit >= 0) {
+        DrawResultPanel(rt, state);
+    } else if (regionSelect) {
         if (state.selecting || state.hasSelection) {
             const RECT& sel = state.selection;
             if (sel.right > sel.left && sel.bottom > sel.top) {
@@ -572,7 +888,7 @@ void PaintOverlay(HWND hwnd) {
         }
 
         if (!state.selecting) {
-            DrawTopChip(rt, state, L"拖动框选二维码区域  ·  Esc 取消", IconId::Crosshair);
+            DrawTopChip(rt, state, L"拖动框选识别区域  ·  Esc 取消", IconId::Crosshair);
         }
     } else if (state.message) {
         DrawMessageCard(rt, state);
@@ -587,14 +903,14 @@ void PaintOverlay(HWND hwnd) {
         DrawPills(rt, &state);
 
         if (state.singleAuto) {
-            DrawTopChip(rt, state, L"已识别二维码，正在打开浏览器…", IconId::Link);
+            DrawTopChip(rt, state, L"已识别可打开的网页，正在打开浏览器…", IconId::Link);
         } else if (state.mode == ScanMode::Fullscreen) {
             std::wstring hint = L"找到 ";
             hint += std::to_wstring(state.hits.size());
-            hint += L" 个二维码  ·  点击按钮打开网页  ·  Esc 退出";
+            hint += L" 个可识别内容  ·  点击按钮打开或查看  ·  Esc 退出";
             DrawTopChip(rt, state, hint, IconId::Link);
         } else {
-            DrawTopChip(rt, state, L"选择要打开的网页  ·  Esc 退出", IconId::Link);
+            DrawTopChip(rt, state, L"点击按钮打开或查看内容  ·  Esc 退出", IconId::Link);
         }
     }
 
@@ -622,8 +938,19 @@ void UpdateSelectionFromPoint(OverlayState* state) {
 }
 
 void UpdateHover(HWND hwnd, OverlayState* state, POINT point) {
+    const float x = point.x / state->uiScale;
+    const float y = point.y / state->uiScale;
+    if (state->resultHit >= 0) {
+        const int hover = ResultButtonAt(*state, x, y);
+        if (hover != state->resultHover) {
+            state->resultHover = hover;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        UpdateCursor(hwnd);
+        return;
+    }
     if (!state->hits.empty()) {
-        const int hover = HitTestPill(*state, point.x / state->uiScale, point.y / state->uiScale);
+        const int hover = HitTestPill(*state, x, y);
         if (hover != state->hover) {
             state->hover = hover;
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -681,10 +1008,11 @@ void RegisterOverlayClass() {
             case WM_MOUSELEAVE:
                 if (g_overlayState) {
                     g_overlayState->trackingMouse = false;
-                    if (g_overlayState->hover != -1) {
-                        g_overlayState->hover = -1;
-                        InvalidateRect(hwnd, nullptr, FALSE);
-                    }
+                    const bool changed = g_overlayState->hover != -1 ||
+                                         g_overlayState->resultHover != -1;
+                    g_overlayState->hover = -1;
+                    g_overlayState->resultHover = -1;
+                    if (changed) InvalidateRect(hwnd, nullptr, FALSE);
                     UpdateCursor(hwnd);
                 }
                 return 0;
@@ -694,6 +1022,13 @@ void RegisterOverlayClass() {
                 SetFocus(hwnd);
                 const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                 state.mouseDown = true;
+                if (state.resultHit >= 0) {
+                    state.resultPressed =
+                        ResultButtonAt(state, point.x / state.uiScale, point.y / state.uiScale);
+                    SetCapture(hwnd);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
                 if (state.message) {
                     state.downHit = -2;
                 } else if (!state.hits.empty()) {
@@ -723,6 +1058,23 @@ void RegisterOverlayClass() {
                     state.releasingCapture = false;
                 }
 
+                if (state.resultHit >= 0) {
+                    const int button =
+                        ResultButtonAt(state, point.x / state.uiScale, point.y / state.uiScale);
+                    const int pressed = state.resultPressed;
+                    state.resultPressed = -1;
+                    if (button >= 0 && button == pressed) {
+                        if (button == 0) {
+                            CopyCurrentResult(&state);
+                        } else {
+                            CloseResultPanel(&state);
+                        }
+                    } else {
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                    return 0;
+                }
+
                 if (state.message) {
                     if (wasDown) DismissMessage();
                     return 0;
@@ -747,15 +1099,21 @@ void RegisterOverlayClass() {
                     const int hitIndex = HitTestPill(state, point.x / state.uiScale,
                                                      point.y / state.uiScale);
                     if (wasDown && hitIndex >= 0 && hitIndex == state.downHit) {
-                        const OverlayHit hit = state.hits[static_cast<size_t>(hitIndex)];
-                        OpenHitAndClose(hit);
+                        if (state.hits[static_cast<size_t>(hitIndex)].isWeb) {
+                            const OverlayHit hit = state.hits[static_cast<size_t>(hitIndex)];
+                            OpenHitAndClose(hit);
+                        } else {
+                            DisplayResult(&state, hitIndex, true);
+                        }
                     }
                 }
                 return 0;
             }
             case WM_RBUTTONUP:
                 if (!g_overlayState) return 0;
-                if (g_overlayState->message) {
+                if (g_overlayState->resultHit >= 0) {
+                    CloseResultPanel(g_overlayState.get());
+                } else if (g_overlayState->message) {
                     DismissMessage();
                 } else {
                     CancelOverlay();
@@ -764,6 +1122,14 @@ void RegisterOverlayClass() {
             case WM_KEYDOWN: {
                 if (!g_overlayState) return 0;
                 OverlayState& state = *g_overlayState;
+                if (state.resultHit >= 0) {
+                    if (wParam == VK_ESCAPE) {
+                        CloseResultPanel(&state);
+                    } else if (wParam == 'C' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                        CopyCurrentResult(&state);
+                    }
+                    return 0;
+                }
                 if (wParam == VK_ESCAPE) {
                     if (state.message) {
                         DismissMessage();
@@ -787,8 +1153,12 @@ void RegisterOverlayClass() {
                 }
                 if ((wParam == VK_RETURN || wParam == VK_SPACE) && !state.hits.empty() &&
                     state.hover >= 0 && state.hover < static_cast<int>(state.hits.size())) {
-                    const OverlayHit hit = state.hits[static_cast<size_t>(state.hover)];
-                    OpenHitAndClose(hit);
+                    if (state.hits[static_cast<size_t>(state.hover)].isWeb) {
+                        const OverlayHit hit = state.hits[static_cast<size_t>(state.hover)];
+                        OpenHitAndClose(hit);
+                    } else {
+                        DisplayResult(&state, state.hover, true);
+                    }
                     return 0;
                 }
                 return 0;
@@ -797,6 +1167,7 @@ void RegisterOverlayClass() {
                 if (g_overlayState && !g_overlayState->releasingCapture) {
                     g_overlayState->selecting = false;
                     g_overlayState->mouseDown = false;
+                    g_overlayState->resultPressed = -1;
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
                 return 0;

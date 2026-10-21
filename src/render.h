@@ -43,6 +43,7 @@ enum class IconId {
     Crosshair,
     Settings,
     ArrowLeft,
+    Info,
 };
 
 Palette MakePalette(bool dark);
