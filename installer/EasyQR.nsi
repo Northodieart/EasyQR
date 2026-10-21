@@ -20,13 +20,13 @@ OutFile "${OUTPUT}"
 !endif
 
 !define APP_NAME "EasyQR"
-!define APP_VERSION "1.2.0"
+!define APP_VERSION "1.3.0"
 !define PUBLISHER "Northodieart"
 !define MAIN_CLASS "EasyQR.MainWindow"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\EasyQR"
 !define PRODUCT_KEY "Software\EasyQR"
 
-VIProductVersion "1.2.0.0"
+VIProductVersion "1.3.0.0"
 VIAddVersionKey "ProductName" "EasyQR"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey "FileDescription" "EasyQR 屏幕二维码识别安装程序"
@@ -81,7 +81,7 @@ Function .onInit
     StrCmp $0 0 install_init_done
     MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON1 \
         "EasyQR 正在运行。安装前需要关闭它，是否现在关闭？" IDNO install_init_abort
-    SendMessage $0 0x0010 0 0 ; WM_CLOSE
+    SendMessage $0 0x8016 0 0 ; EasyQR quit-for-installer message
     Sleep 800
     FindWindow $0 "${MAIN_CLASS}" ""
     StrCmp $0 0 install_init_done
@@ -117,7 +117,7 @@ Section "EasyQR（必需）" SecCore
     WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
     WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
     WriteRegDWORD HKLM "${UNINST_KEY}" "VersionMajor" 1
-    WriteRegDWORD HKLM "${UNINST_KEY}" "VersionMinor" 2
+    WriteRegDWORD HKLM "${UNINST_KEY}" "VersionMinor" 3
 
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
     IntFmt $0 "0x%08X" $0
@@ -141,7 +141,7 @@ Function un.onInit
     StrCmp $0 0 un_init_done
     MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON1 \
         "EasyQR 正在运行。卸载前需要关闭它，是否现在关闭？" IDNO un_init_abort
-    SendMessage $0 0x0010 0 0 ; WM_CLOSE
+    SendMessage $0 0x8016 0 0 ; EasyQR quit-for-installer message
     Sleep 800
     FindWindow $0 "${MAIN_CLASS}" ""
     StrCmp $0 0 un_init_done
@@ -168,6 +168,7 @@ Section "Uninstall"
     DeleteRegKey HKLM "${UNINST_KEY}"
     DeleteRegKey HKLM "${PRODUCT_KEY}"
     DeleteRegKey HKCU "${PRODUCT_KEY}"
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "EasyQR"
 
     ; The app itself never writes to these locations. Cleanup is defense in depth.
     SetShellVarContext current

@@ -1,8 +1,8 @@
 #pragma once
 
 #include "render.h"
+#include "settings.h"
 
-enum class ThemeMode { System, Light, Dark };
 enum class MainView { Home, Settings };
 
 struct AppState {
@@ -14,6 +14,23 @@ struct AppState {
     bool dark = false;
     ThemeMode themeMode = ThemeMode::System;
     MainView view = MainView::Home;
+
+    bool closeToTray = false;
+    bool autoStart = false;
+    bool launchedHidden = false;
+    bool scanReturnToTray = false;
+    bool quitting = false;
+    bool trayVisible = false;
+    bool trayBalloonShown = false;
+
+    HotkeyBinding fullscreenHotkey = HotkeyBinding::DefaultFullscreen();
+    HotkeyBinding regionHotkey = HotkeyBinding::DefaultRegion();
+    bool hotkeyFullscreenRegistered = false;
+    bool hotkeyRegionRegistered = false;
+    enum class HotkeyCapture { None, Fullscreen, Region };
+    HotkeyCapture hotkeyCapture = HotkeyCapture::None;
+    std::wstring settingsNotice;
+    bool settingsNoticeError = false;
     Palette palette{};
     FontSet fonts{};
 

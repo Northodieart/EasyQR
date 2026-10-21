@@ -213,10 +213,6 @@ void DrawMessageCard(ID2D1RenderTarget* rt, const OverlayState& state) {
     top = std::max(16.0f, std::min(top, screenHeight - cardHeight - 16.0f));
     const D2D1_RECT_F card = D2D1::RectF(left, top, left + cardWidth, top + cardHeight);
 
-    FillRounded(rt, state.brush.Get(),
-                D2D1::RectF(card.left + 2.0f, card.top + 7.0f, card.right - 2.0f,
-                            card.bottom + 7.0f),
-                18.0f, Rgba(0.0f, 0.0f, 0.0f, 0.34f));
     FillRounded(rt, state.brush.Get(), card, 16.0f, Rgba(0.072f, 0.072f, 0.078f, 0.96f));
     StrokeRounded(rt, state.brush.Get(), card, 16.0f, Rgba(1.0f, 1.0f, 1.0f, 0.15f), 1.0f);
 
@@ -404,6 +400,12 @@ void RestoreMainWindow(bool activate) {
     g_app.pressedControl = -1;
     g_app.focusControl = -1;
     g_app.keyboardFocus = false;
+    const bool returnToTray = g_app.scanReturnToTray;
+    g_app.scanReturnToTray = false;
+    if (returnToTray) {
+        ShowWindow(g_app.hwnd, SW_HIDE);
+        return;
+    }
     ShowWindow(g_app.hwnd, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
     if (activate) {
         SetForegroundWindow(g_app.hwnd);
@@ -565,10 +567,6 @@ void DrawResultPanel(ID2D1RenderTarget* rt, OverlayState& state) {
     const OverlayHit& hit = state.hits[static_cast<size_t>(state.resultHit)];
     const D2D1_RECT_F card = state.resultCard;
 
-    FillRounded(rt, state.brush.Get(),
-                D2D1::RectF(card.left + 2.0f, card.top + 7.0f, card.right - 2.0f,
-                            card.bottom + 7.0f),
-                18.0f, Rgba(0.0f, 0.0f, 0.0f, 0.36f));
     FillRounded(rt, state.brush.Get(), card, 16.0f, Rgba(0.072f, 0.072f, 0.078f, 0.97f));
     StrokeRounded(rt, state.brush.Get(), card, 16.0f, Rgba(1.0f, 1.0f, 1.0f, 0.15f), 1.0f);
 
@@ -1245,6 +1243,7 @@ void StartScan(ScanMode mode) {
     g_app.hoverControl = -1;
     g_app.pressedControl = -1;
     g_app.keyboardFocus = false;
+    g_app.scanReturnToTray = !IsWindowVisible(g_app.hwnd);
 
     ShowWindow(g_app.hwnd, SW_HIDE);
     DwmFlush();
