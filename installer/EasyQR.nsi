@@ -20,13 +20,13 @@ OutFile "${OUTPUT}"
 !endif
 
 !define APP_NAME "EasyQR"
-!define APP_VERSION "1.1.0"
+!define APP_VERSION "1.1.1"
 !define PUBLISHER "Northodieart"
 !define MAIN_CLASS "EasyQR.MainWindow"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\EasyQR"
 !define PRODUCT_KEY "Software\EasyQR"
 
-VIProductVersion "1.1.0.0"
+VIProductVersion "1.1.1.0"
 VIAddVersionKey "ProductName" "EasyQR"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey "FileDescription" "EasyQR 屏幕二维码识别安装程序"

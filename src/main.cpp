@@ -58,6 +58,27 @@ bool IsDarkThemePreferred() {
     return false;
 }
 
+ThemeMode LoadThemePreference() {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    const LSTATUS status = RegGetValueW(HKEY_CURRENT_USER, L"Software\\EasyQR", L"ThemeMode",
+                                        RRF_RT_REG_DWORD, nullptr, &value, &size);
+    if (status == ERROR_SUCCESS && value <= 2) return static_cast<ThemeMode>(value);
+    return ThemeMode::System;
+}
+
+void SaveThemePreference(ThemeMode mode) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\EasyQR", 0, nullptr, 0, KEY_SET_VALUE,
+                        nullptr, &key, nullptr) != ERROR_SUCCESS) {
+        return;
+    }
+    const DWORD value = static_cast<DWORD>(mode);
+    RegSetValueExW(key, L"ThemeMode", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value),
+                   sizeof(value));
+    RegCloseKey(key);
+}
+
 void SetDwmAttribute(HWND hwnd, DWORD attribute, const void* value, DWORD size) {
     if (hwnd) DwmSetWindowAttribute(hwnd, attribute, value, size);
 }
@@ -328,15 +349,15 @@ void DrawSettings(ID2D1HwndRenderTarget* rt) {
                TextAlign::Trailing, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"截图与识别数据仅在本机内存中处理，不保存任何数据。",
+    DrawTextEx(rt, g_app.dwrite.Get(), L"图像与扫描结果仅在本机内存中处理，不作保存。",
                g_app.fonts.footer.Get(), D2D1::RectF(24.0f, 190.0f, 376.0f, 208.0f),
                g_app.brush.Get(), TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.tertiary);
     DrawTextEx(rt, g_app.dwrite.Get(),
-               L"解码：ZXing-C++ + quirc  ·  主题设置仅本次运行有效", g_app.fonts.chipSmall.Get(),
-               D2D1::RectF(24.0f, 210.0f, 376.0f, 230.0f), g_app.brush.Get(),
-               TextAlign::Leading, true, true);
+               L"解码：ZXing-C++ + quirc  ·  主题偏好保存在本机，卸载时删除",
+               g_app.fonts.chipSmall.Get(), D2D1::RectF(24.0f, 210.0f, 376.0f, 230.0f),
+               g_app.brush.Get(), TextAlign::Leading, true, true);
 }
 
 void PaintMainWindow(HWND hwnd) {
@@ -619,6 +640,7 @@ void SetThemeMode(ThemeMode mode) {
     const bool dark = mode == ThemeMode::System ? g_app.systemDark : mode == ThemeMode::Dark;
     g_app.dark = dark;
     g_app.palette = MakePalette(dark);
+    SaveThemePreference(mode);
     ApplyWindowTheme(g_app.hwnd, dark);
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
@@ -661,8 +683,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     }
 
     g_app.systemDark = IsDarkThemePreferred();
-    g_app.themeMode = ThemeMode::System;
-    g_app.dark = g_app.systemDark;
+    g_app.themeMode = LoadThemePreference();
+    g_app.dark = g_app.themeMode == ThemeMode::System ? g_app.systemDark
+                                                      : g_app.themeMode == ThemeMode::Dark;
     g_app.palette = MakePalette(g_app.dark);
 
     WNDCLASSEXW wc{};
