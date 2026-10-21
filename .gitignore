@@ -1,0 +1,11 @@
+build/
+build-*/
+dist/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.log
+tests/tmp/
+

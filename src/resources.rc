@@ -1,0 +1,41 @@
+#include <windows.h>
+#include "resource.h"
+#include "version.h"
+
+#pragma code_page(65001)
+
+IDI_APP ICON "../assets/easyqr.ico"
+IDR_MANIFEST RT_MANIFEST "app.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION EASYQR_VERSION_COMMA
+ PRODUCTVERSION EASYQR_VERSION_COMMA
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "Northodieart"
+            VALUE "FileDescription", "EasyQR 屏幕二维码识别"
+            VALUE "FileVersion", "1.0.0"
+            VALUE "InternalName", "EasyQR"
+            VALUE "LegalCopyright", "Copyright (c) 2026 Northodieart"
+            VALUE "OriginalFilename", "EasyQR.exe"
+            VALUE "ProductName", "EasyQR"
+            VALUE "ProductVersion", "1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
