@@ -50,15 +50,15 @@ constexpr UINT_PTR kViewAnimationTimer = 2;
 constexpr UINT_PTR kUpdateLaunchTimer = 3;
 constexpr UINT_PTR kSliderTimer = 4;
 constexpr UINT_PTR kLiveSampleTimer = 5;
-constexpr UINT kLiveSampleIntervalMs = 40;
-constexpr int kLiveGlassFactor = 12;
+constexpr UINT kLiveSampleIntervalMs = 20;
+constexpr int kLiveGlassScale = 12;  // desktop pixels per glass pixel
 constexpr UINT kViewAnimationDurationMs = 200;
 constexpr UINT kUpdateLaunchTimeoutMs = 90000;
 constexpr UINT kSliderAnimationDurationMs = 160;
 constexpr DWORD kDwmaCloak = 13;  // DWMWA_CLOAK
 constexpr DWORD kWdaNone = 0x0;               // WDA_NONE
 constexpr DWORD kWdaExcludeFromCapture = 0x11;  // WDA_EXCLUDEFROMCAPTURE
-constexpr int kMainGlassFactor = 20;
+constexpr int kMainGlassScale = 20;
 
 enum TrayCommand : UINT {
     kTrayOpen = 1,
@@ -310,7 +310,7 @@ bool CreateGlassBitmap() {
                                          static_cast<UINT32>(g_app.glassHeight));
     const UINT32 stride = static_cast<UINT32>(g_app.glassWidth) * 4u;
 
-    // The live sampler updates the same-sized texture ~60 times a second;
+    // The live sampler updates the same-sized texture ~50 times a second;
     // refilling it avoids re-allocating a GPU bitmap on every tick.
     if (g_app.glassBitmap && g_app.glassBitmap->GetSize().width == size.width &&
         g_app.glassBitmap->GetSize().height == size.height &&
@@ -1012,7 +1012,7 @@ void DrawSettings(ID2D1RenderTarget* rt) {
                         static_cast<int>(g_app.glassMode),
                         SliderPosition(g_app.glassSlider, static_cast<float>(g_app.glassMode)));
 
-    std::wstring glassNote = L"静态拖动时重采样 · 动态后台实时采样（约 25fps）";
+    std::wstring glassNote = L"静态拖动时重采样 · 动态后台实时采样（约 50fps）";
     D2D1_COLOR_F glassNoteColor = g_app.palette.tertiary;
     if (g_app.glassMode == GlassMode::Dynamic && !g_app.glassAvailable) {
         glassNote = L"动态采样暂不可用，背景暂时显示为纯色";
@@ -1853,9 +1853,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             return 0;
         case WM_TIMER:
             if (wParam == kLiveSampleTimer) {
-                // While dragging, the existing full-desktop texture is remapped for
-                // free; grabbing then would only add latency.
-                if (!g_app.liveSampling || g_app.dragging) return 0;
+                if (!g_app.liveSampling) return 0;
+                // Sampling continues through a drag so the backdrop keeps animating.
                 if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) RequestBackdropSample();
                 return 0;
             }
@@ -1983,11 +1982,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             }
             break;
         case WM_ENTERSIZEMOVE:
-            g_app.dragging = true;
             RefreshMainBackdropForDrag(hwnd);
             break;
         case WM_EXITSIZEMOVE:
-            g_app.dragging = false;
             if (g_app.liveSampling) RequestBackdropSample();
             break;
         case WM_MOVE:
@@ -2191,8 +2188,8 @@ bool CaptureMainBackdropNow() {
     std::vector<uint32_t> pixels;
     int width = 0;
     int height = 0;
-    if (!CaptureScreen(&frame, &error, false, false) ||
-        !BuildGlassImage(frame, kMainGlassFactor, &pixels, &width, &height)) {
+    if (!CaptureScreenScaled(kMainGlassScale, &frame, &error) ||
+        !BuildGlassImage(frame, 1, &pixels, &width, &height)) {
         return false;
     }
 
@@ -2201,8 +2198,8 @@ bool CaptureMainBackdropNow() {
     g_app.glassHeight = height;
     g_app.glassScreenX = frame.x;
     g_app.glassScreenY = frame.y;
-    g_app.glassScreenWidth = frame.width;
-    g_app.glassScreenHeight = frame.height;
+    g_app.glassScreenWidth = frame.regionWidth;
+    g_app.glassScreenHeight = frame.regionHeight;
     g_app.glassAvailable = true;
     g_app.glassBitmap.Reset();
     if (g_app.rt) {
@@ -2220,8 +2217,8 @@ void ApplyGlassCapture(const ScreenFrame& frame, std::vector<uint32_t>&& pixels,
     g_app.glassHeight = height;
     g_app.glassScreenX = frame.x;
     g_app.glassScreenY = frame.y;
-    g_app.glassScreenWidth = frame.width;
-    g_app.glassScreenHeight = frame.height;
+    g_app.glassScreenWidth = frame.regionWidth;
+    g_app.glassScreenHeight = frame.regionHeight;
     g_app.glassAvailable = true;
     g_app.glassBitmap.Reset();
     if (g_app.rt) {
@@ -2240,8 +2237,8 @@ void RequestBackdropSample() {
     std::thread([hwnd] {
         auto* result = new DragCaptureResult();
         std::wstring error;
-        result->ok = CaptureScreen(&result->frame, &error, false, false) &&
-                     BuildGlassImage(result->frame, kLiveGlassFactor, &result->pixels,
+        result->ok = CaptureScreenScaled(kLiveGlassScale, &result->frame, &error) &&
+                     BuildGlassImage(result->frame, 1, &result->pixels,
                                      &result->width, &result->height);
         if (!PostMessageW(hwnd, kDragCaptureDoneMessage, 0,
                           reinterpret_cast<LPARAM>(result))) {
@@ -2328,8 +2325,8 @@ void RefreshMainBackdropForDrag(HWND hwnd) {
         std::thread([hwnd] {
             auto* result = new DragCaptureResult();
             std::wstring error;
-            result->ok = CaptureScreen(&result->frame, &error, false, false) &&
-                         BuildGlassImage(result->frame, kMainGlassFactor, &result->pixels,
+            result->ok = CaptureScreenScaled(kMainGlassScale, &result->frame, &error) &&
+                         BuildGlassImage(result->frame, 1, &result->pixels,
                                          &result->width, &result->height);
             if (!PostMessageW(hwnd, kDragCaptureDoneMessage, 0,
                               reinterpret_cast<LPARAM>(result))) {

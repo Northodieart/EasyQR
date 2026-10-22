@@ -37,14 +37,20 @@ jobs:
       - name: Package
         run: ./scripts/build.sh
 
+      - name: Read version
+        run: |
+          version=$(sed -n 's/.*EASYQR_VERSION_ASCII "\(.*\)".*/\1/p' src/version.h)
+          test -n "$version" || { echo "cannot read version from src/version.h" >&2; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: EasyQR-1.4.11-x64
+          name: EasyQR-${{ env.VERSION }}-x64
           path: |
             dist/EasyQR.exe
-            dist/EasyQR-1.4.11-x64-portable.zip
-            dist/EasyQR-1.4.11-x64-setup.exe
+            dist/EasyQR-${{ env.VERSION }}-x64-portable.zip
+            dist/EasyQR-${{ env.VERSION }}-x64-setup.exe
             dist/SHA256SUMS.txt
 
   release:
@@ -57,7 +63,7 @@ jobs:
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
-          name: EasyQR-1.4.11-x64
+          name: EasyQR-${{ substring(github.ref_name, 1) }}-x64
           path: release
 
       - name: Publish GitHub Release

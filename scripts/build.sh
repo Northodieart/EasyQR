@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="1.4.11"
+VERSION="$(sed -n 's/.*EASYQR_VERSION_ASCII "\(.*\)".*/\1/p' "$ROOT/src/version.h")"
+[ -f "$ROOT/src/version.h" ] && [ -n "$VERSION" ] || { echo "Cannot read version from src/version.h" >&2; exit 1; }
 BUILD_DIR="$ROOT/build/win-x64"
 DIST_DIR="$ROOT/dist"
 
@@ -19,6 +20,7 @@ install -m 0755 "$BUILD_DIR/EasyQR.exe" "$DIST_DIR/EasyQR.exe"
 command -v makensis >/dev/null || { echo "makensis (NSIS) is required" >&2; exit 1; }
 makensis -V2 \
     -DAPP_EXE="$DIST_DIR/EasyQR.exe" \
+    -DAPP_VERSION="$VERSION" \
     -DOUTPUT="$DIST_DIR/EasyQR-$VERSION-x64-setup.exe" \
     -DAPP_ICON="$ROOT/assets/easyqr.ico" \
     -DLICENSE_FILE="$ROOT/LICENSE" \

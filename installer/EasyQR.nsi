@@ -20,7 +20,9 @@ OutFile "${OUTPUT}"
 !endif
 
 !define APP_NAME "EasyQR"
-!define APP_VERSION "1.4.11"
+!ifndef APP_VERSION
+    !error "APP_VERSION must be passed by scripts/build.sh"
+!endif
 !define PUBLISHER "Northodieart"
 !define MAIN_CLASS "EasyQR.MainWindow"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\EasyQR"
