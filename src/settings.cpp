@@ -215,7 +215,7 @@ void SaveCloseToTray(bool enabled) { WriteDword(L"CloseToTray", enabled ? 1u : 0
 
 GlassMode LoadGlassMode() {
     DWORD value = static_cast<DWORD>(GlassMode::Static);
-    if (ReadDword(L"GlassMode", &value) && value <= 2) {
+    if (ReadDword(L"GlassMode", &value) && value <= 3) {
         return static_cast<GlassMode>(value);
     }
 

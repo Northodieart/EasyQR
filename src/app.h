@@ -73,6 +73,7 @@ struct AppState {
     ComPtr<ID2D1SolidColorBrush> brush;
     ComPtr<ID2D1Bitmap> glassBitmap;
     bool liveSampling = false;
+    bool realtimeAlpha = false;  // DWM honours our surface alpha (Win11 24H2+)
     bool dragCapturePending = false;
 
     UINT dpi = 96;

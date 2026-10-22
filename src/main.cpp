@@ -90,6 +90,7 @@ enum ControlId : int {
     kGlassNone = 19,
     kGlassStatic = 20,
     kGlassDynamic = 21,
+    kGlassRealtime = 22,
 };
 
 const D2D1_RECT_F kTileRects[2] = {
@@ -107,8 +108,8 @@ const D2D1_RECT_F kGlassSliderTrack = D2D1::RectF(104.0f, 124.0f, 376.0f, 158.0f
 const D2D1_RECT_F kThemeLabelRect = D2D1::RectF(24.0f, 82.0f, 96.0f, 116.0f);
 const D2D1_RECT_F kGlassLabelRect = D2D1::RectF(24.0f, 124.0f, 96.0f, 158.0f);
 
-D2D1_RECT_F SegmentRect(const D2D1_RECT_F& track, int index) {
-    const float width = (track.right - track.left) / 3.0f;
+D2D1_RECT_F SegmentRect(const D2D1_RECT_F& track, int index, int count) {
+    const float width = (track.right - track.left) / static_cast<float>(count);
     return D2D1::RectF(track.left + width * static_cast<float>(index), track.top,
                        track.left + width * static_cast<float>(index + 1), track.bottom);
 }
@@ -227,21 +228,69 @@ enum BackdropProbeVariant {
     kProbeSampledTint = 5,   // alpha + the sampled blur drawn translucent
     kProbeAcrylicRaw = 6,    // acrylic + frame, no tint of ours at all
     kProbeTabbedFrame = 7,   // alpha + the tabbed-window material + frame
+    // The system backdrop is documented to be drawn behind the window "including
+    // its non-client area", and we strip WS_THICKFRAME and answer WM_NCACTIVATE
+    // ourselves. These two keep the standard framed recipe so DWM still sees a
+    // window it wants to paint a backdrop for.
+    kProbeAcrylicStandard = 8,  // acrylic + frame + framed window recipe
+    kProbeMicaStandard = 9,     // mica + frame + framed window recipe
+    // The translucent sampled glass double-exposes: the stale texture and the
+    // live desktop behind it are two different moments. These two sample much
+    // faster and take the blend out (or nearly out) of it.
+    kProbeFastOpaque = 10,  // 10 ms sampling, texture fully opaque
+    kProbeFastBlend = 11,   // 10 ms sampling, texture at 0.92 over the live desktop
+};
+
+// Three states, because "the variant never asked for it" and "DWM refused" look
+// identical to the person reading the line, and mean very different things.
+enum ProbeCall {
+    kCallNotTried = 0,
+    kCallRefused,
+    kCallAccepted,
 };
 
 struct BackdropProbe {
     int variant = kProbeOff;
     bool requested = false;  // --probe was given, whichever variant is active now
-    bool alpha = false;
-    bool backdrop = false;
-    bool frame = false;
+    ProbeCall alpha = kCallNotTried;
+    ProbeCall material = kCallNotTried;
+    ProbeCall frame = kCallNotTried;
+    bool standardFrame = false;  // keep WS_THICKFRAME and default WM_NCACTIVATE
+    DWORD createdStyle = 0;
     int build = 0;
     bool Active() const { return requested; }
     // The surface really carries alpha on this build and a variant is selected.
-    bool Usable() const { return requested && alpha && variant != kProbeOff; }
+    bool Usable() const {
+        return requested && alpha == kCallAccepted && variant != kProbeOff;
+    }
 };
 
 BackdropProbe g_probe;
+
+// Applied samples per second, so a real machine can report what a cadence is
+// actually worth instead of what was asked for.
+struct LiveRate {
+    ULONGLONG windowStart = 0;
+    int count = 0;
+    int perSecond = 0;
+};
+
+LiveRate g_liveRate;
+
+void NoteAppliedSample() {
+    const ULONGLONG now = GetTickCount64();
+    if (!g_liveRate.windowStart) {
+        g_liveRate.windowStart = now;
+        return;
+    }
+    ++g_liveRate.count;
+    const ULONGLONG elapsed = now - g_liveRate.windowStart;
+    if (elapsed < 1000) return;
+    g_liveRate.perSecond = static_cast<int>(g_liveRate.count * 1000.0 /
+                                           static_cast<double>(elapsed));
+    g_liveRate.count = 0;
+    g_liveRate.windowStart = now;
+}
 
 // Clears any backdrop state a previous version may have left on the window.
 void DisableSystemBackdrop(HWND hwnd) {
@@ -270,32 +319,75 @@ int ReadOsBuild() {
     return _wtoi(buffer);
 }
 
+// Puts the window back into the style shape DWM expects for a framed top-level
+// window, without giving up the borderless client area (WM_NCCALCSIZE still
+// returns 0, so nothing is added around the UI).
+void SetProbeWindowStyle(HWND hwnd) {
+    if (!g_probe.createdStyle) {
+        g_probe.createdStyle = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE));
+    }
+    DWORD style = g_probe.createdStyle & ~static_cast<DWORD>(WS_THICKFRAME);
+    if (g_probe.standardFrame) style |= WS_THICKFRAME;
+    if (static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE)) == style) return;
+    SetWindowLongW(hwnd, GWL_STYLE, static_cast<LONG>(style));
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+}
+
 void ApplyBackdropProbe(HWND hwnd) {
     if (!hwnd || !g_probe.Active()) return;
     g_probe.build = ReadOsBuild();
+    g_probe.standardFrame =
+        g_probe.variant == kProbeAcrylicStandard || g_probe.variant == kProbeMicaStandard;
+    SetProbeWindowStyle(hwnd);
     if (g_probe.variant == kProbeOff) return;
     const BOOL enabled = TRUE;
     g_probe.alpha = SUCCEEDED(DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &enabled,
-                                                   sizeof(enabled)));
-    if (!g_probe.alpha) return;  // Pre-24H2: keep painting opaquely, but report it.
+                                                   sizeof(enabled)))
+                        ? kCallAccepted
+                        : kCallRefused;
+    if (g_probe.alpha != kCallAccepted) return;  // Pre-24H2: paint opaquely, but report it.
 
     int material = 0;
-    if (g_probe.variant == kProbeAcrylicFrame || g_probe.variant == kProbeAcrylicPlain ||
-        g_probe.variant == kProbeAcrylicRaw) {
-        material = 3;  // DWMSBT_TRANSIENTWINDOW (acrylic)
-    } else if (g_probe.variant == kProbeMicaFrame) {
-        material = 2;  // DWMSBT_MAINWINDOW (mica)
-    } else if (g_probe.variant == kProbeTabbedFrame) {
-        material = 4;  // DWMSBT_TABBEDWINDOW
+    bool wantsSheet = false;
+    switch (g_probe.variant) {
+        case kProbeAcrylicFrame:
+        case kProbeAcrylicPlain:
+        case kProbeAcrylicRaw:
+        case kProbeAcrylicStandard:
+            material = 3;  // DWMSBT_TRANSIENTWINDOW (acrylic)
+            break;
+        case kProbeMicaFrame:
+        case kProbeMicaStandard:
+            material = 2;  // DWMSBT_MAINWINDOW (mica)
+            break;
+        case kProbeTabbedFrame:
+            material = 4;  // DWMSBT_TABBEDWINDOW
+            break;
+        default:
+            break;
     }
     if (material) {
-        g_probe.backdrop =
-            SUCCEEDED(DwmSetWindowAttribute(hwnd, 38, &material, sizeof(material)));
+        g_probe.material = SUCCEEDED(DwmSetWindowAttribute(hwnd, 38, &material, sizeof(material)))
+                               ? kCallAccepted
+                               : kCallRefused;
     }
-    if (g_probe.variant == kProbeAcrylicFrame || g_probe.variant == kProbeMicaFrame ||
-        g_probe.variant == kProbeAcrylicRaw || g_probe.variant == kProbeTabbedFrame) {
+    switch (g_probe.variant) {
+        case kProbeAcrylicFrame:
+        case kProbeMicaFrame:
+        case kProbeAcrylicRaw:
+        case kProbeTabbedFrame:
+        case kProbeAcrylicStandard:
+        case kProbeMicaStandard:
+            wantsSheet = true;
+            break;
+        default:
+            break;
+    }
+    if (wantsSheet) {
         const MARGINS sheet{-1, -1, -1, -1};
-        g_probe.frame = SUCCEEDED(DwmExtendFrameIntoClientArea(hwnd, &sheet));
+        g_probe.frame = SUCCEEDED(DwmExtendFrameIntoClientArea(hwnd, &sheet)) ? kCallAccepted
+                                                                              : kCallRefused;
     }
 }
 
@@ -303,17 +395,56 @@ void ApplyBackdropProbe(HWND hwnd) {
 // painted as a translucent veil instead of an opaque fill.
 float ProbeTintAlpha() {
     if (g_probe.variant == kProbeSampledTint) return g_app.dark ? 0.30f : 0.46f;
-    if (g_probe.backdrop) return g_app.dark ? 0.42f : 0.58f;
+    if (g_probe.material == kCallAccepted) return g_app.dark ? 0.42f : 0.58f;
     return g_app.dark ? 0.74f : 0.80f;
 }
 
-bool ProbeUsesSampler() { return g_probe.variant == kProbeSampledTint; }
+bool ProbeUsesSampler() {
+    return g_probe.variant == kProbeSampledTint || g_probe.variant == kProbeFastOpaque ||
+           g_probe.variant == kProbeFastBlend;
+}
+
+// How often the live sampler grabs, in ms.
+UINT ProbeSampleIntervalMs() {
+    if (g_probe.variant == kProbeFastOpaque || g_probe.variant == kProbeFastBlend) return 10;
+    return kLiveSampleIntervalMs;
+}
+
+// Opacity of the sampled texture itself; below 1 lets the live desktop through.
+float ProbeGlassOpacity() {
+    if (g_probe.variant == kProbeSampledTint) return 0.85f;
+    if (g_probe.variant == kProbeFastBlend) return 0.92f;
+    return 1.0f;
+}
+
+// True when the surface carries real alpha: the probe asked for it, or 实时透明 is
+// selected and DWM accepted the redirection-bitmap alpha attribute.
+bool TranslucentSurface() {
+    return g_probe.Usable() ||
+           (g_app.glassMode == GlassMode::Realtime && g_app.realtimeAlpha);
+}
+
+// Turns per-pixel alpha on for 实时透明 and off for every other mode, so the
+// shipped glass paths stay exactly as they were.
+void ApplyRealtimeAlpha(HWND hwnd) {
+    if (!hwnd || g_probe.Active()) return;
+    const bool want = g_app.glassMode == GlassMode::Realtime;
+    const BOOL on = want ? TRUE : FALSE;
+    const HRESULT hr =
+        DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &on, sizeof(on));
+    const bool enabled = want && SUCCEEDED(hr);
+    if (enabled == g_app.realtimeAlpha) return;
+    g_app.realtimeAlpha = enabled;
+    DiscardRenderTarget();
+    EnsureRenderTarget(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
 
 // Switches variants at runtime so one real-machine session can compare them all,
 // with F12 going back to the shipped path. Only reachable when the app was
 // started with --probe.
 void SwitchProbeVariant(HWND hwnd, int variant) {
-    if (!hwnd || variant < kProbeOff || variant > kProbeTabbedFrame) return;
+    if (!hwnd || variant < kProbeOff || variant > kProbeFastBlend) return;
     const BOOL off = FALSE;
     DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &off, sizeof(off));
     const int none = 1;
@@ -326,6 +457,9 @@ void SwitchProbeVariant(HWND hwnd, int variant) {
     g_probe.requested = requested;
     g_probe.variant = variant;
     ApplyBackdropProbe(hwnd);
+    if (g_app.liveSampling) {
+        SetTimer(hwnd, kLiveSampleTimer, ProbeSampleIntervalMs(), nullptr);
+    }
     DiscardRenderTarget();
     EnsureRenderTarget(hwnd);
     RefreshMainBackdrop();
@@ -333,22 +467,23 @@ void SwitchProbeVariant(HWND hwnd, int variant) {
 }
 
 // Paints the translucent page colour over whatever DWM put behind the surface.
-void PaintProbeVeil(ID2D1RenderTarget* rt, HWND hwnd) {
+void PaintTranslucentVeil(ID2D1RenderTarget* rt, HWND hwnd) {
     RECT client{};
     GetClientRect(hwnd, &client);
     const float scale = 96.0f / static_cast<float>(g_app.dpi);
     const D2D1_RECT_F area =
         D2D1::RectF(0.0f, 0.0f, static_cast<float>(client.right) * scale,
                     static_cast<float>(client.bottom) * scale);
-    SetBrushColor(g_app.brush.Get(), WithAlpha(g_app.palette.page, ProbeTintAlpha()));
+    const float alpha = g_probe.Active() ? ProbeTintAlpha() : (g_app.dark ? 0.74f : 0.80f);
+    SetBrushColor(g_app.brush.Get(), WithAlpha(g_app.palette.page, alpha));
     rt->FillRectangle(area, g_app.brush.Get());
 }
 
 bool InitializeHwndRenderer(HWND hwnd, UINT width, UINT height) {
     // The probe path needs real per-pixel alpha out of the surface; the shipped
     // path stays opaque because that is all an older DWM honours.
-    const D2D1_ALPHA_MODE alphaMode =
-        g_probe.Usable() ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE;
+    const D2D1_ALPHA_MODE alphaMode = TranslucentSurface() ? D2D1_ALPHA_MODE_PREMULTIPLIED
+                                                           : D2D1_ALPHA_MODE_IGNORE;
     const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode), 96.0f, 96.0f);
@@ -495,7 +630,8 @@ bool DrawGlassBackground(ID2D1RenderTarget* rt, HWND hwnd) {
     const float scale = 96.0f / static_cast<float>(g_app.dpi);
     const D2D1_RECT_F destination =
         D2D1::RectF(0.0f, 0.0f, clientWidth * scale, clientHeight * scale);
-    rt->DrawBitmap(g_app.glassBitmap.Get(), destination, ProbeUsesSampler() ? 0.85f : 1.0f,
+    rt->DrawBitmap(g_app.glassBitmap.Get(), destination,
+                   ProbeUsesSampler() ? ProbeGlassOpacity() : 1.0f,
                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
     SetBrushColor(g_app.brush.Get(), g_app.palette.page);
     rt->FillRectangle(destination, g_app.brush.Get());
@@ -625,10 +761,10 @@ int ControlAt(float x, float y) {
 
     if (PointInRect(kBackRect, x, y)) return kBack;
     for (int i = 0; i < 3; ++i) {
-        if (PointInRect(SegmentRect(kThemeSliderTrack, i), x, y)) return kThemeSystem + i;
+        if (PointInRect(SegmentRect(kThemeSliderTrack, i, 3), x, y)) return kThemeSystem + i;
     }
-    for (int i = 0; i < 3; ++i) {
-        if (PointInRect(SegmentRect(kGlassSliderTrack, i), x, y)) return kGlassNone + i;
+    for (int i = 0; i < 4; ++i) {
+        if (PointInRect(SegmentRect(kGlassSliderTrack, i, 4), x, y)) return kGlassNone + i;
     }
     if (PointInRect(kCloseToTrayRow, x, y)) return kCloseToTrayControl;
     if (PointInRect(kAutoStartRow, x, y)) return kAutoStartControl;
@@ -641,7 +777,8 @@ int ControlAt(float x, float y) {
 std::vector<int> FocusOrder() {
     if (g_app.view == MainView::Home) return {kFullScreen, kRegion, kSettings};
     return {kBack, kThemeSystem, kThemeLight, kThemeDark, kGlassNone, kGlassStatic,
-            kGlassDynamic, kCloseToTrayControl, kAutoStartControl, kHotkeyFullscreenControl,
+            kGlassDynamic, kGlassRealtime, kCloseToTrayControl, kAutoStartControl,
+            kHotkeyFullscreenControl,
             kHotkeyRegionControl, kUpdateButton};
 }
 
@@ -905,13 +1042,15 @@ const wchar_t* GlassLabel(GlassMode mode) {
             return L"无模糊";
         case GlassMode::Dynamic:
             return L"动态模糊";
+        case GlassMode::Realtime:
+            return L"实时透明";
         default:
             return L"静态模糊";
     }
 }
 
 void DrawSegmentedSlider(ID2D1RenderTarget* rt, const D2D1_RECT_F& track,
-                         const wchar_t* const labels[3], int firstControl, int selected,
+                         const wchar_t* const* labels, int count, int firstControl, int selected,
                          float thumbPosition) {
     const float radius = RectHeight(track) * 0.5f;
     SetBrushColor(g_app.brush.Get(), g_app.palette.card);
@@ -919,14 +1058,14 @@ void DrawSegmentedSlider(ID2D1RenderTarget* rt, const D2D1_RECT_F& track,
     SetBrushColor(g_app.brush.Get(), g_app.palette.border);
     rt->DrawRoundedRectangle(D2D1::RoundedRect(track, radius, radius), g_app.brush.Get(), 1.0f);
 
-    const float segmentWidth = (track.right - track.left) / 3.0f;
+    const float segmentWidth = (track.right - track.left) / static_cast<float>(count);
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < count; ++i) {
         const int control = firstControl + i;
         const bool hovered = g_app.hoverControl == control;
         const bool pressed = g_app.pressedControl == control;
         if ((hovered || pressed) && i != selected) {
-            const D2D1_RECT_F hoverRect = SegmentRect(track, i);
+            const D2D1_RECT_F hoverRect = SegmentRect(track, i, count);
             const D2D1_RECT_F inset =
                 D2D1::RectF(hoverRect.left + 3.0f, hoverRect.top + 3.0f, hoverRect.right - 3.0f,
                             hoverRect.bottom - 3.0f);
@@ -949,12 +1088,12 @@ void DrawSegmentedSlider(ID2D1RenderTarget* rt, const D2D1_RECT_F& track,
     rt->DrawRoundedRectangle(D2D1::RoundedRect(thumb, thumbRadius, thumbRadius),
                              g_app.brush.Get(), 1.2f);
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < count; ++i) {
         const int control = firstControl + i;
         const bool isSelected = i == selected;
         const bool hovered = g_app.hoverControl == control;
         const bool focused = IsFocused(control);
-        const D2D1_RECT_F labelRect = SegmentRect(track, i);
+        const D2D1_RECT_F labelRect = SegmentRect(track, i, count);
         SetBrushColor(g_app.brush.Get(), isSelected || hovered || focused
                                              ? g_app.palette.accent
                                              : g_app.palette.secondary);
@@ -1132,28 +1271,41 @@ void DrawSettings(ID2D1RenderTarget* rt) {
     const wchar_t* const themeLabels[3] = {ThemeLabel(ThemeMode::System),
                                            ThemeLabel(ThemeMode::Light),
                                            ThemeLabel(ThemeMode::Dark)};
-    const wchar_t* const glassLabels[3] = {GlassLabel(GlassMode::None), GlassLabel(GlassMode::Static),
-                                           GlassLabel(GlassMode::Dynamic)};
-    DrawSegmentedSlider(rt, kThemeSliderTrack, themeLabels, kThemeSystem,
+    const wchar_t* const glassLabels[4] = {GlassLabel(GlassMode::None),
+                                           GlassLabel(GlassMode::Static),
+                                           GlassLabel(GlassMode::Dynamic),
+                                           GlassLabel(GlassMode::Realtime)};
+    DrawSegmentedSlider(rt, kThemeSliderTrack, themeLabels, 3, kThemeSystem,
                         static_cast<int>(g_app.themeMode),
                         SliderPosition(g_app.themeSlider, static_cast<float>(g_app.themeMode)));
-    DrawSegmentedSlider(rt, kGlassSliderTrack, glassLabels, kGlassNone,
+    DrawSegmentedSlider(rt, kGlassSliderTrack, glassLabels, 4, kGlassNone,
                         static_cast<int>(g_app.glassMode),
                         SliderPosition(g_app.glassSlider, static_cast<float>(g_app.glassMode)));
 
-    std::wstring glassNote = L"静态拖动时重采样 · 动态后台实时采样（约 50fps）";
+    std::wstring glassNote = L"静态拖动时重采样 · 动态后台实时采样（约 50fps） · 实时透明不采样";
     D2D1_COLOR_F glassNoteColor = g_app.palette.tertiary;
+    if (g_app.glassMode == GlassMode::Realtime && !g_app.realtimeAlpha) {
+        glassNote = L"实时透明需要 Windows 11 24H2 及以上，当前按无模糊显示";
+        glassNoteColor = g_app.palette.secondary;
+    }
     if (g_probe.Active()) {
         // Built by concatenation: the CRT's swprintf reads %s as a narrow string.
-        const auto flag = [](bool ok) { return ok ? L"OK" : L"失败"; };
+        const auto flag = [](ProbeCall call) {
+            if (call == kCallAccepted) return L"OK";
+            return call == kCallRefused ? L"拒绝" : L"未试";
+        };
         std::wstring note = L"探针 " + std::to_wstring(g_probe.variant) + L" · 构建 " +
                             std::to_wstring(g_probe.build);
         if (g_probe.variant != kProbeOff) {
             note += L" · alpha=" + std::wstring(flag(g_probe.alpha)) +
-                    L" · 材质=" + std::wstring(flag(g_probe.backdrop)) +
-                    L" · 边框=" + std::wstring(flag(g_probe.frame));
+                    L" · 材质=" + std::wstring(flag(g_probe.material)) +
+                    L" · 边框=" + std::wstring(flag(g_probe.frame)) +
+                    (g_probe.standardFrame ? L" · 带框" : L"");
+            if (ProbeUsesSampler()) {
+                note += L" · 实测 " + std::to_wstring(g_liveRate.perSecond) + L"/s";
+            }
         } else {
-            note += L"（F1-F5 重新开启）";
+            note += L"（F1-F11 重新开启）";
         }
         glassNote = std::move(note);
         glassNoteColor = g_app.palette.accent;
@@ -1284,8 +1436,9 @@ void PaintMainWindow(HWND hwnd) {
         return;
     }
 
-    if (g_app.glassMode == GlassMode::Dynamic && (!g_probe.Usable() || ProbeUsesSampler()) &&
-        !g_app.liveSampling && IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+    const bool wantsLive = g_app.glassMode == GlassMode::Dynamic ||
+                           (g_probe.Usable() && ProbeUsesSampler());
+    if (wantsLive && !g_app.liveSampling && IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
         // Any path that shows the window ends in a paint, so this is the one
         // place that has to (re)arm the live sampler.
         StartLiveSampling(hwnd);
@@ -1297,12 +1450,12 @@ void PaintMainWindow(HWND hwnd) {
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    if (g_probe.Usable()) {
+    if (TranslucentSurface()) {
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
         if (ProbeUsesSampler() && g_app.glassBitmap) {
             DrawGlassBackground(rt, hwnd);
-        } else if (g_probe.variant != kProbeAcrylicRaw) {
-            PaintProbeVeil(rt, hwnd);
+        } else if (!g_probe.Active() || g_probe.variant != kProbeAcrylicRaw) {
+            PaintTranslucentVeil(rt, hwnd);
         }
     } else if (GlassEnabled() && g_app.glassBitmap) {
         rt->Clear(g_app.palette.page);
@@ -1380,7 +1533,7 @@ void ActivateControl(int control) {
         g_app.focusControl = control;
         return;
     }
-    if (control >= kGlassNone && control <= kGlassDynamic) {
+    if (control >= kGlassNone && control <= kGlassRealtime) {
         SetGlassMode(static_cast<GlassMode>(control - kGlassNone));
         g_app.focusControl = control;
         return;
@@ -1512,8 +1665,11 @@ void HideToTray(HWND hwnd) {
                     MB_ICONERROR | MB_OK);
         return;
     }
-    StopLiveSampling(hwnd);
+    // Hide first: flipping the capture affinity while the window is still on
+    // screen makes DWM rebuild its composition layer at the worst possible
+    // moment, which used to leave a rounded frame burnt into the desktop.
     ShowWindow(hwnd, SW_HIDE);
+    StopLiveSampling(hwnd);
     DiscardRenderTarget();
     UpdateTrayPresence(hwnd);
     if (!g_app.trayBalloonShown) {
@@ -1731,6 +1887,7 @@ void SetGlassMode(GlassMode mode) {
     if (hwnd) {
         StopLiveSampling(hwnd);
         DisableSystemBackdrop(hwnd);
+        ApplyRealtimeAlpha(hwnd);
         EnsureRenderTarget(hwnd);
     }
     g_app.glassBitmap.Reset();
@@ -1962,7 +2119,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 reinterpret_cast<DragCaptureResult*>(lParam));
             if (!g_app.liveSampling) SetWindowDisplayAffinity(hwnd, kWdaNone);
             g_app.dragCapturePending = false;
-            if (result && result->ok && hwnd == g_app.hwnd) {
+            const bool onScreen = IsWindowVisible(hwnd) && !IsIconic(hwnd);
+            if (result && result->ok && hwnd == g_app.hwnd && onScreen) {
                 // Hardware-accelerated or protected surfaces can come back uniformly
                 // black from a GDI grab; keeping the previous texture avoids a flash.
                 uint64_t sum = 0;
@@ -1977,6 +2135,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 if (mean >= 3.0 || !g_app.glassAvailable) {
                     ApplyGlassCapture(result->frame, std::move(result->pixels), result->width,
                                       result->height);
+                    if (g_app.liveSampling) NoteAppliedSample();
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
@@ -2115,6 +2274,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         case WM_NCCALCSIZE:
             return 0;
         case WM_NCACTIVATE:
+            if (g_probe.standardFrame) break;  // let DWM own the frame for the probe
             return TRUE;
         case WM_NCHITTEST: {
             POINT cursor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -2225,7 +2385,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 HandleHotkeyCaptureKey(wParam);
                 return 0;
             }
-            if (g_probe.Active() && wParam >= VK_F1 && wParam <= VK_F7) {
+            if (g_probe.Active() && wParam >= VK_F1 && wParam <= VK_F11) {
                 SwitchProbeVariant(hwnd, static_cast<int>(wParam - VK_F1) + kProbeAlphaOnly);
                 return 0;
             }
@@ -2262,9 +2422,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                     g_app.focusControl = wParam == VK_LEFT ? kFullScreen : kRegion;
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (g_app.focusControl >= kGlassNone &&
-                           g_app.focusControl <= kGlassDynamic) {
+                           g_app.focusControl <= kGlassRealtime) {
                     int selected = static_cast<int>(g_app.glassMode);
-                    selected = (selected + (wParam == VK_RIGHT ? 1 : 2)) % 3;
+                    selected = (selected + (wParam == VK_RIGHT ? 1 : 3)) % 4;
                     SetGlassMode(static_cast<GlassMode>(selected));
                     g_app.focusControl = kGlassNone + selected;
                 } else {
@@ -2411,24 +2571,30 @@ void StartLiveSampling(HWND hwnd) {
     // only screen-capture APIs skip it, so there is no flicker and no cloak.
     SetWindowDisplayAffinity(hwnd, kWdaExcludeFromCapture);
     g_app.liveSampling = true;
-    SetTimer(hwnd, kLiveSampleTimer, kLiveSampleIntervalMs, nullptr);
+    SetTimer(hwnd, kLiveSampleTimer, ProbeSampleIntervalMs(), nullptr);
     RequestBackdropSample();
 }
 
 void StopLiveSampling(HWND hwnd) {
-    if (!g_app.liveSampling) return;
-    g_app.liveSampling = false;
-    if (hwnd) {
-        KillTimer(hwnd, kLiveSampleTimer);
-        SetWindowDisplayAffinity(hwnd, kWdaNone);
+    if (!hwnd) {
+        g_app.liveSampling = false;
+        return;
     }
+    if (g_app.liveSampling) KillTimer(hwnd, kLiveSampleTimer);
+    g_app.liveSampling = false;
+    g_liveRate = LiveRate{};
+    // Idempotent on purpose: leaving the window excluded from capture once the
+    // sampler is off makes it vanish from screenshots and screen recordings.
+    SetWindowDisplayAffinity(hwnd, kWdaNone);
 }
 
 void RefreshMainBackdrop() {
     if (!g_app.hwnd) return;
     const bool visible = IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd);
-    if (g_probe.Usable() && !ProbeUsesSampler()) {
-        // The material is sampled by DWM, so there is nothing to grab.
+    const bool probeSampler = g_probe.Usable() && ProbeUsesSampler();
+    if ((g_probe.Usable() && !probeSampler) || g_app.glassMode == GlassMode::Realtime) {
+        // The material and the desktop are composited by DWM: nothing to grab, so
+        // this mode costs nothing while the window moves.
         StopLiveSampling(g_app.hwnd);
         g_app.glassBitmap.Reset();
         g_app.glassPixels.clear();
@@ -2445,7 +2611,7 @@ void RefreshMainBackdrop() {
         return;
     }
 
-    if (g_app.glassMode == GlassMode::Dynamic) {
+    if (g_app.glassMode == GlassMode::Dynamic || probeSampler) {
         StopLiveSampling(g_app.hwnd);
         if (visible) {
             StartLiveSampling(g_app.hwnd);
@@ -2481,7 +2647,10 @@ void RefreshMainBackdrop() {
 void RefreshMainBackdropForDrag(HWND hwnd) {
     if (!hwnd || !GlassEnabled()) return;
     if (g_probe.Usable() && !ProbeUsesSampler()) return;
-    if (g_app.glassMode == GlassMode::Dynamic) return;  // the live timer covers this
+    if (g_app.glassMode == GlassMode::Realtime) return;
+    if (g_app.glassMode == GlassMode::Dynamic || (g_probe.Usable() && ProbeUsesSampler())) {
+        return;  // the live timer covers this
+    }
     if (g_app.dragCapturePending) return;
 
     // Capture on a worker thread so the modal drag loop is not stalled. The
@@ -2562,7 +2731,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             if (_wcsicmp(arguments[i], L"--updated") == 0) updatedLaunch = true;
             if (_wcsnicmp(arguments[i], L"--probe=", 8) == 0) {
                 const int variant = _wtoi(arguments[i] + 8);
-                if (variant >= kProbeOff && variant <= kProbeTabbedFrame) {
+                if (variant >= kProbeOff && variant <= kProbeFastBlend) {
                     g_probe.requested = true;
                     g_probe.variant = variant;
                 }
@@ -2731,6 +2900,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
     g_app.dpi = DpiOfWindow(hwnd);
     ApplyBackdropProbe(hwnd);
+    ApplyRealtimeAlpha(hwnd);
     CenterMainWindow(hwnd, windowWidth, windowHeight);
     RegisterCurrentHotkeys(true);
 
