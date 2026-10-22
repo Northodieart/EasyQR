@@ -55,7 +55,7 @@ struct AppState {
     ComPtr<IDCompositionTarget> compositionTarget;
     ComPtr<IDCompositionVisual> compositionVisual;
     bool compositionMode = false;
-    bool micaEnabled = false;
+    bool backdropEnabled = false;
 
     UINT dpi = 96;
     int hoverControl = -1;

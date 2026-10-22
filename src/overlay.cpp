@@ -62,8 +62,14 @@ struct OverlayState {
     D2D1_RECT_F copyButton{};
     D2D1_RECT_F backButton{};
 
+    std::vector<uint32_t> blurPixels;
+    int blurWidth = 0;
+    int blurHeight = 0;
+
     ComPtr<ID2D1HwndRenderTarget> rt;
     ComPtr<ID2D1Bitmap> bitmap;
+    ComPtr<ID2D1Bitmap> blurBitmap;
+    ComPtr<ID2D1BitmapBrush> blurBrush;
     ComPtr<ID2D1SolidColorBrush> brush;
 };
 
@@ -77,6 +83,9 @@ const D2D1_COLOR_F kOverlaySecondary = Rgba(0.88f, 0.88f, 0.88f, 1.0f);
 const D2D1_COLOR_F kOverlayTertiary = Rgba(0.64f, 0.64f, 0.64f, 1.0f);
 const D2D1_COLOR_F kOverlayDanger = Rgb(0xFFB4AB);
 const D2D1_COLOR_F kOverlaySuccess = Rgb(0x8FE6A0);
+const D2D1_COLOR_F kGlassTint = Rgba(0.055f, 0.06f, 0.07f, 0.38f);
+const D2D1_COLOR_F kGlassTintStrong = Rgba(0.045f, 0.05f, 0.06f, 0.52f);
+const D2D1_COLOR_F kGlassBorder = Rgba(1.0f, 1.0f, 1.0f, 0.18f);
 
 std::wstring FormatTitle(const std::wstring& format) {
     if (format == L"QRCode") return L"QR Code";
@@ -158,6 +167,93 @@ void FillRounded(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_
     rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), brush);
 }
 
+void BuildBackdropBlur(OverlayState* state) {
+    const ScreenFrame& frame = state->frame;
+    if (frame.width <= 0 || frame.height <= 0 || frame.bgra.empty()) return;
+
+    constexpr int kFactor = 16;
+    const int width = std::max(1, (frame.width + kFactor - 1) / kFactor);
+    const int height = std::max(1, (frame.height + kFactor - 1) / kFactor);
+    std::vector<uint32_t> small(static_cast<size_t>(width) * height);
+    const uint8_t* source = reinterpret_cast<const uint8_t*>(frame.bgra.data());
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            uint64_t red = 0;
+            uint64_t green = 0;
+            uint64_t blue = 0;
+            uint64_t count = 0;
+            const int y0 = y * kFactor;
+            const int x0 = x * kFactor;
+            const int y1 = std::min(frame.height, y0 + kFactor);
+            const int x1 = std::min(frame.width, x0 + kFactor);
+            for (int py = y0; py < y1; py += 2) {
+                const uint8_t* row = source + static_cast<size_t>(py) * frame.width * 4;
+                for (int px = x0; px < x1; px += 2) {
+                    const uint8_t* pixel = row + static_cast<size_t>(px) * 4;
+                    blue += pixel[0];
+                    green += pixel[1];
+                    red += pixel[2];
+                    ++count;
+                }
+            }
+            if (count == 0) count = 1;
+            const uint8_t r = static_cast<uint8_t>(red / count);
+            const uint8_t g = static_cast<uint8_t>(green / count);
+            const uint8_t b = static_cast<uint8_t>(blue / count);
+            uint8_t* out = reinterpret_cast<uint8_t*>(&small[static_cast<size_t>(y) * width + x]);
+            out[0] = b;
+            out[1] = g;
+            out[2] = r;
+            out[3] = 255;
+        }
+    }
+
+    std::vector<uint32_t> blurred(small.size());
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                uint32_t b = 0;
+                uint32_t g = 0;
+                uint32_t r = 0;
+                uint32_t count = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const int sy = ClampInt(y + dy, 0, height - 1);
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int sx = ClampInt(x + dx, 0, width - 1);
+                        const uint8_t* pixel = reinterpret_cast<const uint8_t*>(
+                            &small[static_cast<size_t>(sy) * width + sx]);
+                        b += pixel[0];
+                        g += pixel[1];
+                        r += pixel[2];
+                        ++count;
+                    }
+                }
+                uint8_t* out = reinterpret_cast<uint8_t*>(&blurred[static_cast<size_t>(y) * width + x]);
+                out[0] = static_cast<uint8_t>(b / count);
+                out[1] = static_cast<uint8_t>(g / count);
+                out[2] = static_cast<uint8_t>(r / count);
+                out[3] = 255;
+            }
+        }
+        small.swap(blurred);
+    }
+
+    state->blurWidth = width;
+    state->blurHeight = height;
+    state->blurPixels = std::move(small);
+}
+
+void DrawAcrylicPanel(ID2D1RenderTarget* rt, const OverlayState& state, const D2D1_RECT_F& rect,
+                      float radius, const D2D1_COLOR_F& tint) {
+    if (state.blurBrush) {
+        rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius),
+                                 state.blurBrush.Get());
+        FillRounded(rt, state.brush.Get(), rect, radius, Rgba(0.0f, 0.0f, 0.0f, 0.20f));
+    }
+    FillRounded(rt, state.brush.Get(), rect, radius, tint);
+}
+
 void StrokeRounded(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_RECT_F& rect,
                    float radius, const D2D1_COLOR_F& color, float width) {
     SetBrushColor(brush, color);
@@ -180,11 +276,8 @@ void DrawTopChip(ID2D1RenderTarget* rt, const OverlayState& state, const std::ws
     left = std::max(8.0f, std::min(left, screenWidth - width - 8.0f));
     const D2D1_RECT_F rect = D2D1::RectF(left, top, left + width, top + height);
 
-    FillRounded(rt, state.brush.Get(), D2D1::RectF(rect.left, rect.top + 3.0f, rect.right,
-                                                   rect.bottom + 3.0f),
-                height * 0.5f, Rgba(0.0f, 0.0f, 0.0f, 0.30f));
-    FillRounded(rt, state.brush.Get(), rect, height * 0.5f, Rgba(0.075f, 0.075f, 0.08f, 0.92f));
-    StrokeRounded(rt, state.brush.Get(), rect, height * 0.5f, Rgba(1.0f, 1.0f, 1.0f, 0.15f), 1.0f);
+    DrawAcrylicPanel(rt, state, rect, height * 0.5f, kGlassTint);
+    StrokeRounded(rt, state.brush.Get(), rect, height * 0.5f, kGlassBorder, 1.0f);
 
     const D2D1_RECT_F iconRect =
         D2D1::RectF(rect.left + padding, rect.top + (height - iconSize) * 0.5f,
@@ -213,8 +306,8 @@ void DrawMessageCard(ID2D1RenderTarget* rt, const OverlayState& state) {
     top = std::max(16.0f, std::min(top, screenHeight - cardHeight - 16.0f));
     const D2D1_RECT_F card = D2D1::RectF(left, top, left + cardWidth, top + cardHeight);
 
-    FillRounded(rt, state.brush.Get(), card, 16.0f, Rgba(0.072f, 0.072f, 0.078f, 0.96f));
-    StrokeRounded(rt, state.brush.Get(), card, 16.0f, Rgba(1.0f, 1.0f, 1.0f, 0.15f), 1.0f);
+    DrawAcrylicPanel(rt, state, card, 16.0f, kGlassTintStrong);
+    StrokeRounded(rt, state.brush.Get(), card, 16.0f, kGlassBorder, 1.0f);
 
     const D2D1_RECT_F iconRect = D2D1::RectF(card.left + cardWidth * 0.5f - 15.0f,
                                             card.top + 20.0f, card.left + cardWidth * 0.5f + 15.0f,
@@ -247,17 +340,13 @@ void DrawPills(ID2D1RenderTarget* rt, OverlayState* state) {
         const bool emphasized = hovered || state->singleAuto;
         const float radius = kPillHeight * 0.5f;
 
-        const D2D1_RECT_F shadow = D2D1::RectF(hit.pill.left, hit.pill.top + 3.0f,
-                                               hit.pill.right, hit.pill.bottom + 3.0f);
-        FillRounded(rt, state->brush.Get(), shadow, radius, Rgba(0.0f, 0.0f, 0.0f, 0.36f));
-
-        const D2D1_COLOR_F fill =
-            emphasized ? Rgb(0x0078D4) : Rgba(0.07f, 0.07f, 0.08f, 0.93f);
-        FillRounded(rt, state->brush.Get(), hit.pill, radius, fill);
+        DrawAcrylicPanel(rt, *state, hit.pill, radius, kGlassTint);
+        if (emphasized) {
+            FillRounded(rt, state->brush.Get(), hit.pill, radius,
+                        Rgba(0.0f, 0.42f, 0.78f, 0.48f));
+        }
         StrokeRounded(rt, state->brush.Get(), hit.pill, radius,
-                      emphasized ? Rgba(1.0f, 1.0f, 1.0f, 0.35f)
-                                 : Rgba(1.0f, 1.0f, 1.0f, 0.22f),
-                      1.0f);
+                      emphasized ? Rgba(1.0f, 1.0f, 1.0f, 0.38f) : kGlassBorder, 1.0f);
 
         const D2D1_RECT_F iconRect =
             D2D1::RectF(hit.pill.left + 12.0f, hit.pill.top + (kPillHeight - 15.0f) * 0.5f,
@@ -567,8 +656,8 @@ void DrawResultPanel(ID2D1RenderTarget* rt, OverlayState& state) {
     const OverlayHit& hit = state.hits[static_cast<size_t>(state.resultHit)];
     const D2D1_RECT_F card = state.resultCard;
 
-    FillRounded(rt, state.brush.Get(), card, 16.0f, Rgba(0.072f, 0.072f, 0.078f, 0.97f));
-    StrokeRounded(rt, state.brush.Get(), card, 16.0f, Rgba(1.0f, 1.0f, 1.0f, 0.15f), 1.0f);
+    DrawAcrylicPanel(rt, state, card, 16.0f, kGlassTintStrong);
+    StrokeRounded(rt, state.brush.Get(), card, 16.0f, kGlassBorder, 1.0f);
 
     SetBrushColor(state.brush.Get(), kOverlayWhite);
     DrawTextEx(rt, g_app.dwrite.Get(), L"识别结果", g_app.fonts.messageTitle.Get(),
@@ -585,7 +674,7 @@ void DrawResultPanel(ID2D1RenderTarget* rt, OverlayState& state) {
 
     const D2D1_RECT_F contentBox = D2D1::RectF(card.left + 24.0f, card.top + 78.0f,
                                                card.right - 24.0f, card.bottom - 74.0f);
-    FillRounded(rt, state.brush.Get(), contentBox, 10.0f, Rgba(1.0f, 1.0f, 1.0f, 0.055f));
+    FillRounded(rt, state.brush.Get(), contentBox, 10.0f, Rgba(1.0f, 1.0f, 1.0f, 0.035f));
     StrokeRounded(rt, state.brush.Get(), contentBox, 10.0f, Rgba(1.0f, 1.0f, 1.0f, 0.07f), 1.0f);
     SetBrushColor(state.brush.Get(), kOverlayWhite);
     DrawTextEx(rt, g_app.dwrite.Get(),
@@ -614,13 +703,12 @@ void DrawResultPanel(ID2D1RenderTarget* rt, OverlayState& state) {
     {
         const bool hovered = state.resultHover == 1;
         const bool pressed = state.resultPressed == 1;
-        const D2D1_COLOR_F fill = pressed ? Rgba(0.18f, 0.18f, 0.19f, 0.98f)
-                                         : (hovered ? Rgba(0.16f, 0.16f, 0.17f, 0.98f)
-                                                    : Rgba(0.11f, 0.11f, 0.12f, 0.98f));
-        FillRounded(rt, state.brush.Get(), state.backButton, 10.0f, fill);
+        const D2D1_COLOR_F fill = pressed ? Rgba(0.02f, 0.02f, 0.03f, 0.68f)
+                                         : (hovered ? Rgba(0.04f, 0.04f, 0.05f, 0.60f)
+                                                    : Rgba(0.04f, 0.04f, 0.05f, 0.48f));
+        DrawAcrylicPanel(rt, state, state.backButton, 10.0f, fill);
         StrokeRounded(rt, state.brush.Get(), state.backButton, 10.0f,
-                      hovered ? Rgba(1.0f, 1.0f, 1.0f, 0.32f) : Rgba(1.0f, 1.0f, 1.0f, 0.16f),
-                      1.0f);
+                      hovered ? Rgba(1.0f, 1.0f, 1.0f, 0.32f) : kGlassBorder, 1.0f);
         SetBrushColor(state.brush.Get(), kOverlayWhite);
         DrawTextEx(rt, g_app.dwrite.Get(), state.resultFromChooser ? L"返回" : L"关闭",
                    g_app.fonts.pill.Get(), state.backButton, state.brush.Get(),
@@ -631,23 +719,25 @@ void DrawResultPanel(ID2D1RenderTarget* rt, OverlayState& state) {
     {
         const bool hovered = state.resultHover == 0;
         const bool pressed = state.resultPressed == 0;
-        D2D1_COLOR_F fill = pressed ? Rgb(0x0067C0) : Rgb(0x0078D4);
+        D2D1_COLOR_F fill = pressed ? Rgba(0.0f, 0.30f, 0.60f, 0.62f)
+                                     : (hovered ? Rgba(0.0f, 0.42f, 0.78f, 0.58f)
+                                                : Rgba(0.0f, 0.36f, 0.68f, 0.50f));
         D2D1_COLOR_F border = hovered ? Rgba(1.0f, 1.0f, 1.0f, 0.45f)
                                       : Rgba(1.0f, 1.0f, 1.0f, 0.22f);
         D2D1_COLOR_F text = kOverlayWhite;
         std::wstring label = L"复制内容";
         if (state.resultCopied) {
-            fill = Rgba(0.16f, 0.25f, 0.18f, 0.98f);
+            fill = Rgba(0.10f, 0.34f, 0.18f, 0.55f);
             border = Rgba(0.56f, 0.90f, 0.63f, 0.55f);
             text = kOverlaySuccess;
             label = L"已复制";
         } else if (state.resultCopyFailed) {
-            fill = Rgba(0.22f, 0.12f, 0.12f, 0.98f);
+            fill = Rgba(0.36f, 0.12f, 0.12f, 0.55f);
             border = Rgba(1.0f, 0.70f, 0.67f, 0.55f);
             text = kOverlayDanger;
             label = L"复制失败";
         }
-        FillRounded(rt, state.brush.Get(), state.copyButton, 10.0f, fill);
+        DrawAcrylicPanel(rt, state, state.copyButton, 10.0f, fill);
         StrokeRounded(rt, state.brush.Get(), state.copyButton, 10.0f, border, 1.0f);
         SetBrushColor(state.brush.Get(), text);
         DrawTextEx(rt, g_app.dwrite.Get(), label, g_app.fonts.pill.Get(), state.copyButton,
@@ -796,16 +886,42 @@ bool CreateOverlayTargets(HWND hwnd) {
         D2D1::SizeU(static_cast<UINT32>(state.frame.width), static_cast<UINT32>(state.frame.height)),
         state.frame.bgra.data(), static_cast<UINT32>(state.frame.width) * 4u, bitmapProperties,
         state.bitmap.Put());
-    return SUCCEEDED(hr) && state.bitmap;
+    if (FAILED(hr) || !state.bitmap) return false;
+
+    if (state.blurWidth > 0 && state.blurHeight > 0 && !state.blurPixels.empty()) {
+        if (SUCCEEDED(state.rt->CreateBitmap(
+                D2D1::SizeU(static_cast<UINT32>(state.blurWidth),
+                            static_cast<UINT32>(state.blurHeight)),
+                state.blurPixels.data(), static_cast<UINT32>(state.blurWidth) * 4u,
+                bitmapProperties, state.blurBitmap.Put())) &&
+            state.blurBitmap) {
+            D2D1_BITMAP_BRUSH_PROPERTIES brushProperties{};
+            brushProperties.extendModeX = D2D1_EXTEND_MODE_CLAMP;
+            brushProperties.extendModeY = D2D1_EXTEND_MODE_CLAMP;
+            brushProperties.interpolationMode = D2D1_BITMAP_INTERPOLATION_MODE_LINEAR;
+            if (SUCCEEDED(state.rt->CreateBitmapBrush(
+                    state.blurBitmap.Get(), brushProperties, state.blurBrush.Put())) &&
+                state.blurBrush) {
+                const float screenWidth = state.frame.width / state.uiScale;
+                const float screenHeight = state.frame.height / state.uiScale;
+                state.blurBrush->SetTransform(
+                    D2D1::Matrix3x2F::Scale(screenWidth / state.blurWidth,
+                                           screenHeight / state.blurHeight));
+            }
+        }
+    }
+    return true;
 }
 
 void EnsureOverlayTargets(HWND hwnd) {
     if (!g_overlayState) return;
     OverlayState& state = *g_overlayState;
     if (state.rt && state.bitmap && state.brush) return;
-    state.rt.Reset();
+    state.blurBrush.Reset();
+    state.blurBitmap.Reset();
     state.bitmap.Reset();
     state.brush.Reset();
+    state.rt.Reset();
     CreateOverlayTargets(hwnd);
 }
 
@@ -878,7 +994,8 @@ void PaintOverlay(HWND hwnd) {
                 chipLeft = std::max(6.0f, std::min(chipLeft, screenWidth - chipWidth - 6.0f));
                 const D2D1_RECT_F chip = D2D1::RectF(chipLeft, chipTop, chipLeft + chipWidth,
                                                      chipTop + chipHeight);
-                FillRounded(rt, state.brush.Get(), chip, 6.0f, Rgba(0.08f, 0.08f, 0.08f, 0.88f));
+                DrawAcrylicPanel(rt, state, chip, 6.0f, kGlassTint);
+                StrokeRounded(rt, state.brush.Get(), chip, 6.0f, kGlassBorder, 1.0f);
                 SetBrushColor(state.brush.Get(), kOverlayWhite);
                 DrawTextEx(rt, g_app.dwrite.Get(), sizeText, g_app.fonts.chipSmall.Get(), chip,
                            state.brush.Get(), TextAlign::Center, true, true);
@@ -917,6 +1034,8 @@ void PaintOverlay(HWND hwnd) {
     EndPaint(hwnd, &ps);
 
     if (hr == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) {
+        state.blurBrush.Reset();
+        state.blurBitmap.Reset();
         state.bitmap.Reset();
         state.brush.Reset();
         state.rt.Reset();
@@ -1190,6 +1309,8 @@ void RegisterOverlayClass() {
                 return 0;
             case WM_DESTROY:
                 if (g_overlayState) {
+                    g_overlayState->blurBrush.Reset();
+                    g_overlayState->blurBitmap.Reset();
                     g_overlayState->bitmap.Reset();
                     g_overlayState->brush.Reset();
                     g_overlayState->rt.Reset();
@@ -1266,6 +1387,7 @@ void StartScan(ScanMode mode) {
 
     state.uiScale = std::max(1.0f, static_cast<float>(DpiOfWindow(g_app.hwnd)) / 96.0f);
     state.primaryPx = PrimaryMonitorRectRelativeTo(state.frame);
+    BuildBackdropBlur(&state);
 
     if (mode == ScanMode::Fullscreen) {
         PrepareFullscreenResults(&state);

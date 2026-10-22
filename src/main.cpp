@@ -4,6 +4,8 @@
 #include "update.h"
 #include "version.h"
 
+#include <shlobj.h>
+
 #include <cstring>
 #include <cwchar>
 
@@ -59,7 +61,7 @@ const D2D1_RECT_F kTileRects[2] = {
 const D2D1_RECT_F kTitleSettingsRect = D2D1::RectF(268.0f, 0.0f, 312.0f, 44.0f);
 const D2D1_RECT_F kMinimizeRect = D2D1::RectF(312.0f, 0.0f, 356.0f, 44.0f);
 const D2D1_RECT_F kCloseRect = D2D1::RectF(356.0f, 0.0f, 400.0f, 44.0f);
-const D2D1_RECT_F kAppMarkRect = D2D1::RectF(16.0f, 12.0f, 36.0f, 32.0f);
+const D2D1_RECT_F kAppMarkRect = D2D1::RectF(16.0f, 11.0f, 38.0f, 33.0f);
 const D2D1_RECT_F kBackRect = D2D1::RectF(44.0f, 4.0f, 80.0f, 40.0f);
 const D2D1_RECT_F kTitleTextRect = D2D1::RectF(84.0f, 0.0f, 264.0f, 44.0f);
 const D2D1_RECT_F kThemeRects[3] = {
@@ -175,14 +177,17 @@ bool CreateCompositionTargetBitmap() {
     return true;
 }
 
-void EnableMicaIfAvailable(HWND hwnd) {
+void EnableSystemBackdrop(HWND hwnd) {
     if (!hwnd || !g_app.compositionMode) return;
-    int backdrop = 2;  // DWMSBT_MAINWINDOW
+
+    MARGINS margins{-1, -1, -1, -1};
+    DwmExtendFrameIntoClientArea(hwnd, &margins);
+    BOOL hostBackdrop = TRUE;
+    DwmSetWindowAttribute(hwnd, 40, &hostBackdrop, sizeof(hostBackdrop));  // host backdrop brush
+    int backdrop = 3;  // DWMSBT_TRANSIENTWINDOW (system Acrylic)
     const HRESULT hr = DwmSetWindowAttribute(hwnd, 38, &backdrop, sizeof(backdrop));
     if (SUCCEEDED(hr)) {
-        MARGINS margins{-1, -1, -1, -1};
-        DwmExtendFrameIntoClientArea(hwnd, &margins);
-        g_app.micaEnabled = true;
+        g_app.backdropEnabled = true;
         UpdatePalette();
         InvalidateRect(hwnd, nullptr, FALSE);
     }
@@ -298,7 +303,7 @@ bool InitializeCompositionRenderer(HWND hwnd, UINT width, UINT height) {
     }
 
     g_app.compositionMode = true;
-    EnableMicaIfAvailable(hwnd);
+    EnableSystemBackdrop(hwnd);
     UpdatePalette();
     return true;
 }
@@ -321,7 +326,7 @@ bool InitializeHwndRenderer(HWND hwnd, UINT width, UINT height) {
     g_app.hwndTarget = target.Get();
     g_app.rt.Attach(target.Detach());
     g_app.compositionMode = false;
-    g_app.micaEnabled = false;
+    g_app.backdropEnabled = false;
     if (!CreateRenderBrush()) {
         g_app.hwndTarget = nullptr;
         g_app.rt.Reset();
@@ -372,18 +377,18 @@ void DiscardRenderTarget() {
     g_app.swapChain.Reset();
     g_app.d3dDevice.Reset();
     g_app.compositionMode = false;
-    g_app.micaEnabled = false;
+    g_app.backdropEnabled = false;
 }
 
 void UpdatePalette() {
     g_app.palette = MakePalette(g_app.dark);
-    if (!g_app.micaEnabled) return;
-    g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.58f : 0.46f);
-    g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.74f : 0.72f);
-    g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, 0.82f);
-    g_app.palette.cardPressed = WithAlpha(g_app.palette.cardPressed, 0.76f);
-    g_app.palette.border = WithAlpha(g_app.palette.border, 0.72f);
-    g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, 0.66f);
+    if (!g_app.backdropEnabled) return;
+    g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.34f : 0.24f);
+    g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.68f : 0.68f);
+    g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, 0.78f);
+    g_app.palette.cardPressed = WithAlpha(g_app.palette.cardPressed, 0.72f);
+    g_app.palette.border = WithAlpha(g_app.palette.border, 0.62f);
+    g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, 0.58f);
 }
 
 bool IsFocused(int control) {
@@ -424,8 +429,15 @@ void ResizeWindowForView(HWND hwnd) {
     } else {
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     }
-    const int x = work.left + std::max(0, (static_cast<int>(work.right - work.left) - width) / 2);
-    const int y = work.top + std::max(0, (static_cast<int>(work.bottom - work.top) - height) / 2);
+
+    RECT current{};
+    GetWindowRect(hwnd, &current);
+    int x = current.left;
+    int y = current.top;
+    if (x + width > work.right) x = work.right - width;
+    if (x < work.left) x = work.left;
+    if (y + height > work.bottom) y = work.bottom - height;
+    if (y < work.top) y = work.top;
     SetWindowPos(hwnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -587,8 +599,8 @@ void DrawAppMark(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect) {
     SetBrushColor(g_app.brush.Get(), Rgb(0x0078D4));
     rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), g_app.brush.Get());
 
-    const float unit = RectWidth(rect) / 20.0f;
-    const float stroke = std::max(1.35f, 1.55f * unit);
+    const float unit = RectWidth(rect) / 24.0f;
+    const float stroke = std::max(1.1f, 1.3f * unit);
     D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(
         D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
         D2D1_LINE_JOIN_ROUND, 10.0f);
@@ -606,14 +618,14 @@ void DrawAppMark(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect) {
                      strokeStyle.Get());
     };
 
-    line(6.0f, 10.0f, 6.0f, 7.0f);
-    line(6.0f, 7.0f, 10.0f, 7.0f);
-    line(14.0f, 7.0f, 18.0f, 7.0f);
-    line(18.0f, 7.0f, 18.0f, 10.0f);
-    line(6.0f, 14.0f, 6.0f, 17.0f);
-    line(6.0f, 17.0f, 10.0f, 17.0f);
-    line(14.0f, 17.0f, 18.0f, 17.0f);
-    line(18.0f, 17.0f, 18.0f, 14.0f);
+    line(5.0f, 12.0f, 5.0f, 6.8f);
+    line(5.0f, 6.8f, 10.0f, 6.8f);
+    line(14.0f, 6.8f, 19.0f, 6.8f);
+    line(19.0f, 6.8f, 19.0f, 12.0f);
+    line(5.0f, 12.0f, 5.0f, 17.2f);
+    line(5.0f, 17.2f, 10.0f, 17.2f);
+    line(14.0f, 17.2f, 19.0f, 17.2f);
+    line(19.0f, 17.2f, 19.0f, 12.0f);
     line(8.0f, 12.0f, 16.0f, 12.0f);
 }
 
@@ -997,7 +1009,7 @@ void PaintMainWindow(HWND hwnd) {
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    if (g_app.micaEnabled) {
+    if (g_app.backdropEnabled) {
         rt->Clear(D2D1::ColorF(0, 0.0f));
         SetBrushColor(g_app.brush.Get(), g_app.palette.page);
         RECT client{};
@@ -1159,10 +1171,29 @@ void UpdateTrayPresence(HWND hwnd) {
     }
 }
 
+void ApplyWindowIcons(HWND hwnd) {
+    if (!hwnd) return;
+    const HICON large = static_cast<HICON>(
+        LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                   GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED));
+    const HICON small = static_cast<HICON>(
+        LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                   GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+    if (large) {
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large));
+        SetClassLongPtrW(hwnd, GCLP_HICON, reinterpret_cast<LONG_PTR>(large));
+    }
+    if (small) {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+        SetClassLongPtrW(hwnd, GCLP_HICONSM, reinterpret_cast<LONG_PTR>(small));
+    }
+}
+
 void ShowMainFromTray(HWND hwnd) {
     if (!hwnd) return;
     g_app.launchedHidden = false;
     ShowWindow(hwnd, SW_RESTORE);
+    ApplyWindowIcons(hwnd);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
     InvalidateRect(hwnd, nullptr, FALSE);
@@ -1558,14 +1589,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             return 0;
         case WM_CREATE: {
             g_app.hwnd = hwnd;
-            const HICON large = static_cast<HICON>(
-                LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
-                           GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED));
-            const HICON small = static_cast<HICON>(
-                LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
-                           GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
-            if (large) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large));
-            if (small) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+            ApplyWindowIcons(hwnd);
             ApplyWindowTheme(hwnd, g_app.dark);
             return 0;
         }
@@ -1815,11 +1839,7 @@ void ApplyWindowTheme(HWND hwnd, bool dark) {
     if (!hwnd) return;
     const BOOL useDark = dark ? TRUE : FALSE;
     SetDwmAttribute(hwnd, 20, &useDark, sizeof(useDark));  // DWMWA_USE_IMMERSIVE_DARK_MODE
-    if (g_app.compositionMode) {
-        int backdrop = 2;  // DWMSBT_MAINWINDOW (Mica)
-        SetDwmAttribute(hwnd, 38, &backdrop, sizeof(backdrop));
-    }
-    int corner = 2;  // DWMWCP_ROUND
+    int corner = 2;                                        // DWMWCP_ROUND
     SetDwmAttribute(hwnd, 33, &corner, sizeof(corner));
 }
 
@@ -1897,9 +1917,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     }
 
     if (!executablePath.empty()) {
-        std::wstring oldExecutable(executablePath.begin(), executablePath.end());
-        oldExecutable += L".old";
+        std::wstring currentExecutable(executablePath.begin(), executablePath.end());
+        std::wstring oldExecutable = currentExecutable + L".old";
         DeleteFileW(oldExecutable.c_str());
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                       currentExecutable.c_str(), nullptr);
     }
     CleanupUpdateCache();
 
@@ -2002,10 +2024,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             g_app.settingsNotice = L"托盘图标创建失败，已显示主窗口";
             g_app.settingsNoticeError = true;
             ShowWindow(hwnd, SW_SHOW);
+            ApplyWindowIcons(hwnd);
             UpdateWindow(hwnd);
         }
     } else {
         ShowWindow(hwnd, showCommand == SW_SHOWMAXIMIZED ? SW_SHOWNORMAL : showCommand);
+        ApplyWindowIcons(hwnd);
         UpdateWindow(hwnd);
         if (g_app.closeToTray) EnsureTrayIcon(hwnd);
     }
