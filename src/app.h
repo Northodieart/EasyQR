@@ -74,6 +74,7 @@ struct AppState {
     ComPtr<ID2D1Bitmap> glassBitmap;
     bool liveSampling = false;
     bool dragCapturePending = false;
+    bool dragging = false;
 
     UINT dpi = 96;
     int hoverControl = -1;

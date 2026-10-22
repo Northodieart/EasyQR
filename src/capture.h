@@ -14,8 +14,12 @@ struct ScreenFrame {
 };
 
 // Captures the whole virtual desktop into memory. Never writes a file.
-bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray = true);
+// captureLayered adds CAPTUREBLT; it forces a software cursor path that makes
+// the pointer flicker, so only the QR scan needs it.
+bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray = true,
+                   bool captureLayered = true);
 
 // Captures a screen rectangle (virtual-desktop coordinates) as BGRA only.
-// Used by the live glass, which samples just the area behind the window.
-bool CaptureScreenRect(const RECT& bounds, ScreenFrame* frame, std::wstring* error);
+// Used by the glass, which samples the desktop without grabbing the cursor.
+bool CaptureScreenRect(const RECT& bounds, ScreenFrame* frame, std::wstring* error,
+                       bool captureLayered = false);

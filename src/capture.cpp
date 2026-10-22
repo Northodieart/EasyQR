@@ -21,7 +21,8 @@ std::wstring LastErrorText(const wchar_t* prefix) {
 
 }  // namespace
 
-static bool CaptureBounds(const RECT& bounds, ScreenFrame* frame, std::wstring* error, bool includeGray) {
+static bool CaptureBounds(const RECT& bounds, ScreenFrame* frame, std::wstring* error,
+                      bool includeGray, bool captureLayered) {
     if (!frame) return false;
 
     ScreenFrame result;
@@ -74,9 +75,10 @@ static bool CaptureBounds(const RECT& bounds, ScreenFrame* frame, std::wstring* 
     }
 
     HGDIOBJ previous = SelectObject(memory_dc, bitmap);
-    BOOL copied = BitBlt(memory_dc, 0, 0, result.width, result.height, screen_dc, result.x,
-                         result.y, SRCCOPY | CAPTUREBLT);
-    if (!copied) {
+    const DWORD raster = captureLayered ? (SRCCOPY | CAPTUREBLT) : SRCCOPY;
+    BOOL copied =
+        BitBlt(memory_dc, 0, 0, result.width, result.height, screen_dc, result.x, result.y, raster);
+    if (!copied && captureLayered) {
         copied = BitBlt(memory_dc, 0, 0, result.width, result.height, screen_dc, result.x,
                         result.y, SRCCOPY);
     }
@@ -124,15 +126,17 @@ static bool CaptureBounds(const RECT& bounds, ScreenFrame* frame, std::wstring* 
     return true;
 }
 
-bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray) {
+bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray,
+                   bool captureLayered) {
     const LONG x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const LONG y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const LONG width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     const LONG height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
     const RECT bounds{x, y, x + width, y + height};
-    return CaptureBounds(bounds, frame, error, includeGray);
+    return CaptureBounds(bounds, frame, error, includeGray, captureLayered);
 }
 
-bool CaptureScreenRect(const RECT& bounds, ScreenFrame* frame, std::wstring* error) {
-    return CaptureBounds(bounds, frame, error, false);
+bool CaptureScreenRect(const RECT& bounds, ScreenFrame* frame, std::wstring* error,
+                       bool captureLayered) {
+    return CaptureBounds(bounds, frame, error, false, captureLayered);
 }
