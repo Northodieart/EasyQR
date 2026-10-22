@@ -59,6 +59,15 @@ struct AppState {
     int viewAnimationStartHeight = 0;
     int viewAnimationTargetHeight = 0;
 
+    struct SliderAnimation {
+        bool active = false;
+        ULONGLONG start = 0;
+        float from = 0.0f;
+        float to = 0.0f;
+    };
+    SliderAnimation themeSlider;
+    SliderAnimation glassSlider;
+
     ComPtr<ID2D1RenderTarget> rt;
     ID2D1HwndRenderTarget* hwndTarget = nullptr;
     ID2D1DeviceContext* d2dContext = nullptr;

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="1.4.5"
+VERSION="1.4.6"
 BUILD_DIR="$ROOT/build/win-x64"
 DIST_DIR="$ROOT/dist"
 

@@ -32,9 +32,13 @@ constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
 constexpr UINT_PTR kViewAnimationTimer = 2;
 constexpr UINT_PTR kUpdateLaunchTimer = 3;
+constexpr UINT_PTR kSliderTimer = 4;
 constexpr UINT kViewAnimationDurationMs = 200;
 constexpr UINT kUpdateLaunchTimeoutMs = 90000;
+constexpr UINT kSliderAnimationDurationMs = 160;
 constexpr DWORD kDwmaCloak = 13;  // DWMWA_CLOAK
+constexpr DWORD kWdaNone = 0x0;               // WDA_NONE
+constexpr DWORD kWdaExcludeFromCapture = 0x11;  // WDA_EXCLUDEFROMCAPTURE
 constexpr int kMainGlassFactor = 20;
 
 enum TrayCommand : UINT {
@@ -78,16 +82,16 @@ const D2D1_RECT_F kCloseRect = D2D1::RectF(356.0f, 0.0f, 400.0f, 44.0f);
 const D2D1_RECT_F kAppMarkRect = D2D1::RectF(16.0f, 11.0f, 38.0f, 33.0f);
 const D2D1_RECT_F kBackRect = D2D1::RectF(44.0f, 4.0f, 80.0f, 40.0f);
 const D2D1_RECT_F kTitleTextRect = D2D1::RectF(84.0f, 0.0f, 264.0f, 44.0f);
-const D2D1_RECT_F kThemeRects[3] = {
-    D2D1::RectF(24.0f, 82.0f, 136.0f, 116.0f),
-    D2D1::RectF(144.0f, 82.0f, 256.0f, 116.0f),
-    D2D1::RectF(264.0f, 82.0f, 376.0f, 116.0f),
-};
-const D2D1_RECT_F kGlassRects[3] = {
-    D2D1::RectF(24.0f, 124.0f, 136.0f, 158.0f),
-    D2D1::RectF(144.0f, 124.0f, 256.0f, 158.0f),
-    D2D1::RectF(264.0f, 124.0f, 376.0f, 158.0f),
-};
+const D2D1_RECT_F kThemeSliderTrack = D2D1::RectF(104.0f, 82.0f, 376.0f, 116.0f);
+const D2D1_RECT_F kGlassSliderTrack = D2D1::RectF(104.0f, 124.0f, 376.0f, 158.0f);
+const D2D1_RECT_F kThemeLabelRect = D2D1::RectF(24.0f, 82.0f, 96.0f, 116.0f);
+const D2D1_RECT_F kGlassLabelRect = D2D1::RectF(24.0f, 124.0f, 96.0f, 158.0f);
+
+D2D1_RECT_F SegmentRect(const D2D1_RECT_F& track, int index) {
+    const float width = (track.right - track.left) / 3.0f;
+    return D2D1::RectF(track.left + width * static_cast<float>(index), track.top,
+                       track.left + width * static_cast<float>(index + 1), track.bottom);
+}
 const D2D1_RECT_F kCloseToTrayRow = D2D1::RectF(24.0f, 206.0f, 376.0f, 240.0f);
 const D2D1_RECT_F kCloseToTraySwitch = D2D1::RectF(328.0f, 210.0f, 376.0f, 236.0f);
 const D2D1_RECT_F kAutoStartRow = D2D1::RectF(24.0f, 244.0f, 376.0f, 278.0f);
@@ -151,12 +155,17 @@ bool IsWindows11OrGreater() {
 }
 
 bool ShouldUseComposition() {
+    // Only the dynamic glass mode needs DirectComposition + a D3D11 swap chain
+    // (system Acrylic needs a transparent composited surface). None/Static draw
+    // an opaque or pre-blurred frame, so the plain HWND render target keeps the
+    // GPU device and compositor node out of the picture and saves power.
     static const bool supported = IsWindows11OrGreater();
-    return supported;
+    return supported && g_app.glassMode == GlassMode::Dynamic;
 }
 
 void UpdatePalette();
 bool CreateGlassBitmap();
+void DiscardRenderTarget();
 
 bool CreateRenderBrush() {
     g_app.brush.Reset();
@@ -464,6 +473,14 @@ void EnsureRenderTarget(HWND hwnd) {
     InitializeHwndRenderer(hwnd, width, height);
 }
 
+void RecreateRenderTarget(HWND hwnd) {
+    if (!hwnd) return;
+    const bool wasVisible = IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    DiscardRenderTarget();
+    EnsureRenderTarget(hwnd);
+    if (wasVisible) InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void ResizeRenderTarget(UINT width, UINT height) {
     if (g_app.compositionMode && g_app.d2dContext && g_app.swapChain) {
         g_app.d2dContext->SetTarget(nullptr);
@@ -709,10 +726,10 @@ int ControlAt(float x, float y) {
 
     if (PointInRect(kBackRect, x, y)) return kBack;
     for (int i = 0; i < 3; ++i) {
-        if (PointInRect(kThemeRects[i], x, y)) return kThemeSystem + i;
+        if (PointInRect(SegmentRect(kThemeSliderTrack, i), x, y)) return kThemeSystem + i;
     }
     for (int i = 0; i < 3; ++i) {
-        if (PointInRect(kGlassRects[i], x, y)) return kGlassNone + i;
+        if (PointInRect(SegmentRect(kGlassSliderTrack, i), x, y)) return kGlassNone + i;
     }
     if (PointInRect(kCloseToTrayRow, x, y)) return kCloseToTrayControl;
     if (PointInRect(kAutoStartRow, x, y)) return kAutoStartControl;
@@ -853,38 +870,54 @@ void DrawStatus(ID2D1RenderTarget* rt) {
 }
 
 void DrawAppMark(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect) {
-    const float radius = RectWidth(rect) * 0.28f;
+    // Same geometry as assets/easyqr.svg so the title bar mark, window icon,
+    // tray icon and shortcuts all show the identical design.
+    const float size = RectWidth(rect);
+    const float inset = size * (64.0f / 1024.0f);
+    const D2D1_RECT_F badge =
+        D2D1::RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset);
+    const float radius = size * (224.0f / 1024.0f);
     SetBrushColor(g_app.brush.Get(), Rgb(0x0078D4));
-    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), g_app.brush.Get());
+    rt->FillRoundedRectangle(D2D1::RoundedRect(badge, radius, radius), g_app.brush.Get());
 
-    const float unit = RectWidth(rect) / 24.0f;
-    const float stroke = std::max(1.1f, 1.3f * unit);
+    ComPtr<ID2D1Factory> factory;
+    rt->GetFactory(factory.Put());
+    if (!factory) return;
+    ComPtr<ID2D1PathGeometry> geometry;
+    if (FAILED(factory->CreatePathGeometry(geometry.Put())) || !geometry) return;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geometry->Open(sink.Put())) || !sink) return;
+
+    const float unit = size / 1024.0f;
+    auto point = [&](float x, float y) {
+        return D2D1::Point2F(rect.left + x * unit, rect.top + y * unit);
+    };
+    auto corner = [&](float ax, float ay, float bx, float by, float cx, float cy, float dx,
+                      float dy, float ex, float ey) {
+        sink->BeginFigure(point(ax, ay), D2D1_FIGURE_BEGIN_HOLLOW);
+        sink->AddLine(point(bx, by));
+        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(point(cx, cy), point(dx, dy)));
+        sink->AddLine(point(ex, ey));
+        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    };
+    corner(260, 480, 260, 340, 260, 260, 340, 260, 440, 260);
+    corner(584, 260, 684, 260, 764, 260, 764, 340, 764, 480);
+    corner(764, 544, 764, 684, 764, 764, 684, 764, 584, 764);
+    corner(440, 764, 340, 764, 260, 764, 260, 684, 260, 544);
+    sink->BeginFigure(point(370, 512), D2D1_FIGURE_BEGIN_HOLLOW);
+    sink->AddLine(point(654, 512));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    sink->Close();
+
     D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(
         D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
         D2D1_LINE_JOIN_ROUND, 10.0f);
     ComPtr<ID2D1StrokeStyle> strokeStyle;
-    ComPtr<ID2D1Factory> factory;
-    rt->GetFactory(factory.Put());
-    if (factory) factory->CreateStrokeStyle(props, nullptr, 0, strokeStyle.Put());
+    factory->CreateStrokeStyle(props, nullptr, 0, strokeStyle.Put());
 
     SetBrushColor(g_app.brush.Get(), D2D1::ColorF(D2D1::ColorF::White));
-    auto point = [&](float x, float y) {
-        return D2D1::Point2F(rect.left + x * unit, rect.top + y * unit);
-    };
-    auto line = [&](float x0, float y0, float x1, float y1) {
-        rt->DrawLine(point(x0, y0), point(x1, y1), g_app.brush.Get(), stroke,
+    rt->DrawGeometry(geometry.Get(), g_app.brush.Get(), std::max(1.0f, size * (70.0f / 1024.0f)),
                      strokeStyle.Get());
-    };
-
-    line(5.0f, 12.0f, 5.0f, 6.8f);
-    line(5.0f, 6.8f, 10.0f, 6.8f);
-    line(14.0f, 6.8f, 19.0f, 6.8f);
-    line(19.0f, 6.8f, 19.0f, 12.0f);
-    line(5.0f, 12.0f, 5.0f, 17.2f);
-    line(5.0f, 17.2f, 10.0f, 17.2f);
-    line(14.0f, 17.2f, 19.0f, 17.2f);
-    line(19.0f, 17.2f, 19.0f, 12.0f);
-    line(8.0f, 12.0f, 16.0f, 12.0f);
 }
 
 void DrawCaptionButton(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, int control, bool close) {
@@ -953,46 +986,27 @@ void DrawHome(ID2D1RenderTarget* rt) {
     DrawStatus(rt);
 }
 
-void DrawThemeButton(ID2D1RenderTarget* rt, int index) {
-    const int control = kThemeSystem + index;
-    const D2D1_RECT_F rect = kThemeRects[index];
-    const ThemeMode mode = static_cast<ThemeMode>(index);
-    const bool selected = g_app.themeMode == mode;
-    const bool hovered = g_app.hoverControl == control;
-    const bool pressed = g_app.pressedControl == control;
-    const bool focused = IsFocused(control);
+float SliderPosition(const AppState::SliderAnimation& anim, float selected) {
+    if (!anim.active) return selected;
+    const double elapsed = static_cast<double>(GetTickCount64() - anim.start);
+    const double progress =
+        std::min(1.0, elapsed / static_cast<double>(kSliderAnimationDurationMs));
+    const double eased = 1.0 - std::pow(1.0 - progress, 3.0);
+    return anim.from + (anim.to - anim.from) * static_cast<float>(eased);
+}
 
-    D2D1_COLOR_F fill = g_app.palette.card;
-    if (selected) {
-        fill = g_app.palette.accentSoftHover;
-    } else if (pressed) {
-        fill = g_app.palette.cardPressed;
-    } else if (hovered) {
-        fill = g_app.palette.cardHover;
+void BeginSliderAnimation(AppState::SliderAnimation& anim, float target) {
+    const float current = anim.active ? SliderPosition(anim, anim.to) : anim.to;
+    if (std::fabs(current - target) < 0.001f) {
+        anim.active = false;
+        anim.to = target;
+        return;
     }
-    SetBrushColor(g_app.brush.Get(), fill);
-    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 9.0f, 9.0f), g_app.brush.Get());
-
-    SetBrushColor(g_app.brush.Get(),
-                  selected || focused ? g_app.palette.accent
-                                      : (hovered ? g_app.palette.borderHover
-                                                 : g_app.palette.border));
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 9.0f, 9.0f), g_app.brush.Get(),
-                             selected || focused ? 1.4f : 1.0f);
-
-    SetBrushColor(g_app.brush.Get(),
-                  selected || hovered || focused ? g_app.palette.accent : g_app.palette.secondary);
-    DrawTextEx(rt, g_app.dwrite.Get(), ThemeLabel(mode), g_app.fonts.chip.Get(),
-               D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom), g_app.brush.Get(),
-               TextAlign::Center, true, true);
-
-    if (focused) {
-        const D2D1_RECT_F focusRect =
-            D2D1::RectF(rect.left + 2.0f, rect.top + 2.0f, rect.right - 2.0f, rect.bottom - 2.0f);
-        SetBrushColor(g_app.brush.Get(), g_app.palette.accent);
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(focusRect, 7.0f, 7.0f), g_app.brush.Get(),
-                                 1.4f);
-    }
+    anim.from = current;
+    anim.to = target;
+    anim.start = GetTickCount64();
+    anim.active = true;
+    if (g_app.hwnd) SetTimer(g_app.hwnd, kSliderTimer, 10, nullptr);
 }
 
 const wchar_t* GlassLabel(GlassMode mode) {
@@ -1006,45 +1020,65 @@ const wchar_t* GlassLabel(GlassMode mode) {
     }
 }
 
-void DrawGlassButton(ID2D1RenderTarget* rt, int index) {
-    const int control = kGlassNone + index;
-    const D2D1_RECT_F rect = kGlassRects[index];
-    const GlassMode mode = static_cast<GlassMode>(index);
-    const bool selected = g_app.glassMode == mode;
-    const bool hovered = g_app.hoverControl == control;
-    const bool pressed = g_app.pressedControl == control;
-    const bool focused = IsFocused(control);
+void DrawSegmentedSlider(ID2D1RenderTarget* rt, const D2D1_RECT_F& track,
+                         const wchar_t* const labels[3], int firstControl, int selected,
+                         float thumbPosition) {
+    const float radius = RectHeight(track) * 0.5f;
+    SetBrushColor(g_app.brush.Get(), g_app.palette.card);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(track, radius, radius), g_app.brush.Get());
+    SetBrushColor(g_app.brush.Get(), g_app.palette.border);
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(track, radius, radius), g_app.brush.Get(), 1.0f);
 
-    D2D1_COLOR_F fill = g_app.palette.card;
-    if (selected) {
-        fill = g_app.palette.accentSoftHover;
-    } else if (pressed) {
-        fill = g_app.palette.cardPressed;
-    } else if (hovered) {
-        fill = g_app.palette.cardHover;
+    const float segmentWidth = (track.right - track.left) / 3.0f;
+
+    for (int i = 0; i < 3; ++i) {
+        const int control = firstControl + i;
+        const bool hovered = g_app.hoverControl == control;
+        const bool pressed = g_app.pressedControl == control;
+        if ((hovered || pressed) && i != selected) {
+            const D2D1_RECT_F hoverRect = SegmentRect(track, i);
+            const D2D1_RECT_F inset =
+                D2D1::RectF(hoverRect.left + 3.0f, hoverRect.top + 3.0f, hoverRect.right - 3.0f,
+                            hoverRect.bottom - 3.0f);
+            const float hoverRadius = RectHeight(inset) * 0.5f;
+            SetBrushColor(g_app.brush.Get(), pressed ? g_app.palette.cardPressed
+                                                     : g_app.palette.cardHover);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(inset, hoverRadius, hoverRadius),
+                                     g_app.brush.Get());
+        }
     }
-    SetBrushColor(g_app.brush.Get(), fill);
-    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 9.0f, 9.0f), g_app.brush.Get());
 
-    SetBrushColor(g_app.brush.Get(),
-                  selected || focused ? g_app.palette.accent
-                                      : (hovered ? g_app.palette.borderHover
-                                                 : g_app.palette.border));
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 9.0f, 9.0f), g_app.brush.Get(),
-                             selected || focused ? 1.4f : 1.0f);
+    const D2D1_RECT_F thumb =
+        D2D1::RectF(track.left + segmentWidth * thumbPosition + 3.0f, track.top + 3.0f,
+                    track.left + segmentWidth * (thumbPosition + 1.0f) - 3.0f, track.bottom - 3.0f);
+    const float thumbRadius = RectHeight(thumb) * 0.5f;
+    SetBrushColor(g_app.brush.Get(), g_app.palette.accentSoftHover);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(thumb, thumbRadius, thumbRadius),
+                             g_app.brush.Get());
+    SetBrushColor(g_app.brush.Get(), g_app.palette.accent);
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(thumb, thumbRadius, thumbRadius),
+                             g_app.brush.Get(), 1.2f);
 
-    SetBrushColor(g_app.brush.Get(),
-                  selected || hovered || focused ? g_app.palette.accent : g_app.palette.secondary);
-    DrawTextEx(rt, g_app.dwrite.Get(), GlassLabel(mode), g_app.fonts.chip.Get(),
-               D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom), g_app.brush.Get(),
-               TextAlign::Center, true, true);
-
-    if (focused) {
-        const D2D1_RECT_F focusRect =
-            D2D1::RectF(rect.left + 2.0f, rect.top + 2.0f, rect.right - 2.0f, rect.bottom - 2.0f);
-        SetBrushColor(g_app.brush.Get(), g_app.palette.accent);
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(focusRect, 7.0f, 7.0f), g_app.brush.Get(),
-                                 1.4f);
+    for (int i = 0; i < 3; ++i) {
+        const int control = firstControl + i;
+        const bool isSelected = i == selected;
+        const bool hovered = g_app.hoverControl == control;
+        const bool focused = IsFocused(control);
+        const D2D1_RECT_F labelRect = SegmentRect(track, i);
+        SetBrushColor(g_app.brush.Get(), isSelected || hovered || focused
+                                             ? g_app.palette.accent
+                                             : g_app.palette.secondary);
+        DrawTextEx(rt, g_app.dwrite.Get(), labels[i], g_app.fonts.chip.Get(), labelRect,
+                   g_app.brush.Get(), TextAlign::Center, true, true);
+        if (focused) {
+            const D2D1_RECT_F focusRect =
+                D2D1::RectF(labelRect.left + 4.0f, labelRect.top + 4.0f, labelRect.right - 4.0f,
+                            labelRect.bottom - 4.0f);
+            const float focusRadius = RectHeight(focusRect) * 0.5f;
+            SetBrushColor(g_app.brush.Get(), g_app.palette.accent);
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(focusRect, focusRadius, focusRadius),
+                                     g_app.brush.Get(), 1.2f);
+        }
     }
 }
 
@@ -1195,11 +1229,27 @@ void DrawSettings(ID2D1RenderTarget* rt) {
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"外观与模糊", g_app.fonts.label.Get(),
+    DrawTextEx(rt, g_app.dwrite.Get(), L"外观", g_app.fonts.label.Get(),
                D2D1::RectF(24.0f, 64.0f, 200.0f, 80.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
-    for (int i = 0; i < 3; ++i) DrawThemeButton(rt, i);
-    for (int i = 0; i < 3; ++i) DrawGlassButton(rt, i);
+
+    SetBrushColor(g_app.brush.Get(), g_app.palette.text);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"主题", g_app.fonts.cardBody.Get(), kThemeLabelRect,
+               g_app.brush.Get(), TextAlign::Leading, true, true);
+    DrawTextEx(rt, g_app.dwrite.Get(), L"模糊", g_app.fonts.cardBody.Get(), kGlassLabelRect,
+               g_app.brush.Get(), TextAlign::Leading, true, true);
+
+    const wchar_t* const themeLabels[3] = {ThemeLabel(ThemeMode::System),
+                                           ThemeLabel(ThemeMode::Light),
+                                           ThemeLabel(ThemeMode::Dark)};
+    const wchar_t* const glassLabels[3] = {GlassLabel(GlassMode::None), GlassLabel(GlassMode::Static),
+                                           GlassLabel(GlassMode::Dynamic)};
+    DrawSegmentedSlider(rt, kThemeSliderTrack, themeLabels, kThemeSystem,
+                        static_cast<int>(g_app.themeMode),
+                        SliderPosition(g_app.themeSlider, static_cast<float>(g_app.themeMode)));
+    DrawSegmentedSlider(rt, kGlassSliderTrack, glassLabels, kGlassNone,
+                        static_cast<int>(g_app.glassMode),
+                        SliderPosition(g_app.glassSlider, static_cast<float>(g_app.glassMode)));
 
     std::wstring glassNote = L"静态在拖动时重新采样 · 动态使用系统实时 Acrylic";
     D2D1_COLOR_F glassNoteColor = g_app.palette.tertiary;
@@ -1750,6 +1800,13 @@ void ToggleAutoStart() {
 
 bool CaptureStaticBackdropWithHiddenWindow(HWND hwnd) {
     const bool wasVisible = hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    if (wasVisible && SetWindowDisplayAffinity(hwnd, kWdaExcludeFromCapture)) {
+        // Capture exclusion keeps the window on screen, avoiding a visible flash.
+        DwmFlush();
+        const bool captured = CaptureMainBackdropNow();
+        SetWindowDisplayAffinity(hwnd, kWdaNone);
+        return captured;
+    }
     if (wasVisible) {
         ShowWindow(hwnd, SW_HIDE);
         DwmFlush();
@@ -1770,6 +1827,7 @@ void SetGlassMode(GlassMode mode) {
     HWND hwnd = g_app.hwnd;
     if (hwnd && g_app.viewAnimationActive) CompleteViewAnimation(hwnd);
 
+    BeginSliderAnimation(g_app.glassSlider, static_cast<float>(mode));
     g_app.glassMode = mode;
     SaveGlassMode(mode);
 
@@ -1777,7 +1835,10 @@ void SetGlassMode(GlassMode mode) {
         g_app.glassBitmap.Reset();
         g_app.glassAvailable = false;
         g_app.glassPixels.clear();
-        if (hwnd) DisableSystemBackdrop(hwnd);
+        if (hwnd) {
+            DisableSystemBackdrop(hwnd);
+            if (g_app.compositionMode) RecreateRenderTarget(hwnd);
+        }
         UpdatePalette();
         if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
         return;
@@ -1788,7 +1849,11 @@ void SetGlassMode(GlassMode mode) {
         g_app.glassAvailable = false;
         g_app.glassPixels.clear();
         if (hwnd) {
-            EnsureRenderTarget(hwnd);
+            if (!g_app.compositionMode) {
+                RecreateRenderTarget(hwnd);
+            } else {
+                EnsureRenderTarget(hwnd);
+            }
             if (EnableDynamicBackdrop(hwnd)) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return;
@@ -1806,6 +1871,7 @@ void SetGlassMode(GlassMode mode) {
     }
 
     if (hwnd) DisableSystemBackdrop(hwnd);
+    if (hwnd && g_app.compositionMode) RecreateRenderTarget(hwnd);
     g_app.glassBitmap.Reset();
     g_app.glassAvailable = false;
     if (!g_app.glassPixels.empty()) {
@@ -2046,6 +2112,22 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             PaintMainWindow(hwnd);
             return 0;
         case WM_TIMER:
+            if (wParam == kSliderTimer) {
+                bool animating = false;
+                const ULONGLONG now = GetTickCount64();
+                for (AppState::SliderAnimation* anim :
+                     {&g_app.themeSlider, &g_app.glassSlider}) {
+                    if (!anim->active) continue;
+                    if (now - anim->start >= kSliderAnimationDurationMs) {
+                        anim->active = false;
+                    } else {
+                        animating = true;
+                    }
+                }
+                if (!animating) KillTimer(hwnd, kSliderTimer);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             if (wParam == kUpdateLaunchTimer) {
                 KillTimer(hwnd, kUpdateLaunchTimer);
                 if (g_app.updateState == UpdateState::Launching) {
@@ -2437,8 +2519,21 @@ void RefreshMainBackdropForDrag(HWND hwnd) {
         return;
     }
 
-    // Hide the window from one composition so the capture contains the current
-    // desktop behind it rather than a snapshot of our own glass surface.
+    // Exclude the window from capture instead of cloaking it: the window stays
+    // visible on screen, so there is no one-frame flash while we resample.
+    if (SetWindowDisplayAffinity(hwnd, kWdaExcludeFromCapture)) {
+        DwmFlush();
+        const bool refreshed = CaptureMainBackdropNow();
+        SetWindowDisplayAffinity(hwnd, kWdaNone);
+        if (refreshed) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+            UpdateWindow(hwnd);
+        }
+        return;
+    }
+
+    // Older systems without capture exclusion: cloak for one composition so the
+    // capture contains the desktop behind us rather than our own glass surface.
     BOOL cloak = TRUE;
     if (FAILED(DwmSetWindowAttribute(hwnd, kDwmaCloak, &cloak, sizeof(cloak)))) return;
     DwmFlush();
@@ -2477,6 +2572,7 @@ void RefreshTheme() {
 }
 
 void SetThemeMode(ThemeMode mode) {
+    if (g_app.themeMode != mode) BeginSliderAnimation(g_app.themeSlider, static_cast<float>(mode));
     g_app.themeMode = mode;
     if (mode == ThemeMode::System) g_app.systemDark = IsDarkThemePreferred();
     const bool dark = mode == ThemeMode::System ? g_app.systemDark : mode == ThemeMode::Dark;
@@ -2609,13 +2705,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     g_app.themeMode = LoadThemeMode();
     g_app.closeToTray = LoadCloseToTray();
     g_app.glassMode = LoadGlassMode();
+    g_app.themeSlider.to = static_cast<float>(g_app.themeMode);
+    g_app.glassSlider.to = static_cast<float>(g_app.glassMode);
     g_app.autoStart = IsAutoStartEnabled();
     g_app.fullscreenHotkey = LoadHotkey(true);
     g_app.regionHotkey = LoadHotkey(false);
     g_app.launchedHidden = launchedHidden;
     g_app.dark = g_app.themeMode == ThemeMode::System ? g_app.systemDark
                                                       : g_app.themeMode == ThemeMode::Dark;
-    g_app.compositionMode = ShouldUseComposition();
     UpdatePalette();
 
     WNDCLASSEXW wc{};
@@ -2645,8 +2742,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     const int windowWidth = MulDiv(static_cast<int>(kClientWidth), systemDpi, 96);
     const int windowHeight = MulDiv(static_cast<int>(ClientHeightForView()), systemDpi, 96);
     const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
-    DWORD exStyle = WS_EX_APPWINDOW;
-    if (g_app.compositionMode) exStyle |= WS_EX_NOREDIRECTIONBITMAP;
+    // The window must keep a redirection bitmap: WS_EX_NOREDIRECTIONBITMAP would
+    // leave DWM no surface to draw the system Acrylic/Mica backdrop into, so the
+    // dynamic glass mode would render nothing.
+    const DWORD exStyle = WS_EX_APPWINDOW;
 
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
