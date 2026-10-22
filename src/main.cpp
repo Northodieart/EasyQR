@@ -1,4 +1,6 @@
 #include "app.h"
+#include "capture.h"
+#include "glass.h"
 #include "overlay.h"
 #include "resource.h"
 #include "update.h"
@@ -137,6 +139,7 @@ bool ShouldUseComposition() {
 }
 
 void UpdatePalette();
+bool CreateGlassBitmap();
 
 bool CreateRenderBrush() {
     g_app.brush.Reset();
@@ -177,20 +180,61 @@ bool CreateCompositionTargetBitmap() {
     return true;
 }
 
+enum class WindowCompositionAttribute : int { AccentPolicy = 19 };
+
+struct AccentPolicy {
+    int accentState;
+    int accentFlags;
+    DWORD gradientColor;
+    int animationId;
+};
+
+struct WindowCompositionAttributeData {
+    WindowCompositionAttribute attribute;
+    void* data;
+    size_t size;
+};
+
+using SetWindowCompositionAttributeFn =
+    BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
+
+bool ApplyAccentAcrylic(HWND hwnd) {
+    static const SetWindowCompositionAttributeFn setAttribute = [] {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        FARPROC procedure = user32 ? GetProcAddress(user32, "SetWindowCompositionAttribute")
+                                   : nullptr;
+        SetWindowCompositionAttributeFn function = nullptr;
+        if (procedure) std::memcpy(&function, &procedure, sizeof(function));
+        return function;
+    }();
+    if (!setAttribute) return false;
+
+    AccentPolicy policy{};
+    policy.accentState = 4;  // ACCENT_ENABLE_ACRYLICBLURBEHIND
+    policy.accentFlags = 2;
+    policy.gradientColor = g_app.dark ? 0x66000000u : 0x66F3F3F3u;
+    WindowCompositionAttributeData data{WindowCompositionAttribute::AccentPolicy, &policy,
+                                        sizeof(policy)};
+    return setAttribute(hwnd, &data) != FALSE;
+}
+
 void EnableSystemBackdrop(HWND hwnd) {
     if (!hwnd || !g_app.compositionMode) return;
 
     MARGINS margins{-1, -1, -1, -1};
     DwmExtendFrameIntoClientArea(hwnd, &margins);
-    BOOL hostBackdrop = TRUE;
-    DwmSetWindowAttribute(hwnd, 40, &hostBackdrop, sizeof(hostBackdrop));  // host backdrop brush
-    int backdrop = 3;  // DWMSBT_TRANSIENTWINDOW (system Acrylic)
-    const HRESULT hr = DwmSetWindowAttribute(hwnd, 38, &backdrop, sizeof(backdrop));
-    if (SUCCEEDED(hr)) {
-        g_app.backdropEnabled = true;
-        UpdatePalette();
-        InvalidateRect(hwnd, nullptr, FALSE);
+
+    bool applied = ApplyAccentAcrylic(hwnd);
+    if (!applied) {
+        BOOL hostBackdrop = TRUE;
+        DwmSetWindowAttribute(hwnd, 40, &hostBackdrop, sizeof(hostBackdrop));
+        int backdrop = 3;  // DWMSBT_TRANSIENTWINDOW (system Acrylic)
+        applied = SUCCEEDED(DwmSetWindowAttribute(hwnd, 38, &backdrop, sizeof(backdrop)));
     }
+
+    g_app.backdropEnabled = applied;
+    UpdatePalette();
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 bool InitializeCompositionRenderer(HWND hwnd, UINT width, UINT height) {
@@ -303,7 +347,8 @@ bool InitializeCompositionRenderer(HWND hwnd, UINT width, UINT height) {
     }
 
     g_app.compositionMode = true;
-    EnableSystemBackdrop(hwnd);
+    CreateGlassBitmap();
+    if (!g_app.glassAvailable) EnableSystemBackdrop(hwnd);
     UpdatePalette();
     return true;
 }
@@ -332,6 +377,7 @@ bool InitializeHwndRenderer(HWND hwnd, UINT width, UINT height) {
         g_app.rt.Reset();
         return false;
     }
+    CreateGlassBitmap();
     UpdatePalette();
     return true;
 }
@@ -370,6 +416,8 @@ void DiscardRenderTarget() {
     g_app.hwndTarget = nullptr;
     g_app.d2dContext = nullptr;
     g_app.rt.Reset();
+    g_app.glassBitmap.Reset();
+    g_app.glassAvailable = false;
     g_app.targetBitmap.Reset();
     g_app.compositionVisual.Reset();
     g_app.compositionTarget.Reset();
@@ -382,13 +430,73 @@ void DiscardRenderTarget() {
 
 void UpdatePalette() {
     g_app.palette = MakePalette(g_app.dark);
-    if (!g_app.backdropEnabled) return;
-    g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.34f : 0.24f);
-    g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.68f : 0.68f);
-    g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, 0.78f);
-    g_app.palette.cardPressed = WithAlpha(g_app.palette.cardPressed, 0.72f);
-    g_app.palette.border = WithAlpha(g_app.palette.border, 0.62f);
-    g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, 0.58f);
+    if (!g_app.backdropEnabled && !g_app.glassAvailable) return;
+    g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.42f : 0.62f);
+    g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.72f : 0.80f);
+    g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, g_app.dark ? 0.82f : 0.88f);
+    g_app.palette.cardPressed = WithAlpha(g_app.palette.cardPressed, g_app.dark ? 0.78f : 0.84f);
+    g_app.palette.border = WithAlpha(g_app.palette.border, 0.68f);
+    g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, 0.64f);
+    if (!g_app.dark) {
+        g_app.palette.secondary = Rgb(0x3F3F3F);
+        g_app.palette.tertiary = Rgb(0x666666);
+    }
+}
+
+bool CreateGlassBitmap() {
+    g_app.glassBitmap.Reset();
+    if (!g_app.rt || g_app.glassWidth <= 0 || g_app.glassHeight <= 0 ||
+        g_app.glassPixels.empty()) {
+        g_app.glassAvailable = false;
+        UpdatePalette();
+        return false;
+    }
+
+    const D2D1_BITMAP_PROPERTIES properties = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+    const HRESULT hr = g_app.rt->CreateBitmap(
+        D2D1::SizeU(static_cast<UINT32>(g_app.glassWidth),
+                    static_cast<UINT32>(g_app.glassHeight)),
+        g_app.glassPixels.data(), static_cast<UINT32>(g_app.glassWidth) * 4u, properties,
+        g_app.glassBitmap.Put());
+    g_app.glassAvailable = SUCCEEDED(hr) && g_app.glassBitmap;
+    UpdatePalette();
+    return g_app.glassAvailable;
+}
+
+bool DrawGlassBackground(ID2D1RenderTarget* rt, HWND hwnd) {
+    if (!rt || !g_app.glassBitmap || g_app.glassScreenWidth <= 0 ||
+        g_app.glassScreenHeight <= 0) {
+        return false;
+    }
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    const int clientWidth = client.right - client.left;
+    const int clientHeight = client.bottom - client.top;
+    if (clientWidth <= 0 || clientHeight <= 0) return false;
+
+    POINT origin{0, 0};
+    ClientToScreen(hwnd, &origin);
+    const float xScale = static_cast<float>(g_app.glassWidth) / g_app.glassScreenWidth;
+    const float yScale = static_cast<float>(g_app.glassHeight) / g_app.glassScreenHeight;
+    const float sourceLeft = (origin.x - g_app.glassScreenX) * xScale;
+    const float sourceTop = (origin.y - g_app.glassScreenY) * yScale;
+    const float sourceRight = sourceLeft + clientWidth * xScale;
+    const float sourceBottom = sourceTop + clientHeight * yScale;
+    const D2D1_RECT_F source = D2D1::RectF(
+        std::max(0.0f, sourceLeft), std::max(0.0f, sourceTop),
+        std::min(static_cast<float>(g_app.glassWidth), sourceRight),
+        std::min(static_cast<float>(g_app.glassHeight), sourceBottom));
+    if (source.right <= source.left || source.bottom <= source.top) return false;
+
+    const float scale = 96.0f / static_cast<float>(g_app.dpi);
+    const D2D1_RECT_F destination =
+        D2D1::RectF(0.0f, 0.0f, clientWidth * scale, clientHeight * scale);
+    rt->DrawBitmap(g_app.glassBitmap.Get(), destination, 1.0f,
+                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
+    SetBrushColor(g_app.brush.Get(), g_app.palette.page);
+    rt->FillRectangle(destination, g_app.brush.Get());
+    return true;
 }
 
 bool IsFocused(int control) {
@@ -1009,7 +1117,10 @@ void PaintMainWindow(HWND hwnd) {
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    if (g_app.backdropEnabled) {
+    if (g_app.glassBitmap) {
+        rt->Clear(g_app.palette.page);
+        DrawGlassBackground(rt, hwnd);
+    } else if (g_app.backdropEnabled) {
         rt->Clear(D2D1::ColorF(0, 0.0f));
         SetBrushColor(g_app.brush.Get(), g_app.palette.page);
         RECT client{};
@@ -1192,6 +1303,7 @@ void ApplyWindowIcons(HWND hwnd) {
 void ShowMainFromTray(HWND hwnd) {
     if (!hwnd) return;
     g_app.launchedHidden = false;
+    RefreshMainBackdrop();
     ShowWindow(hwnd, SW_RESTORE);
     ApplyWindowIcons(hwnd);
     SetForegroundWindow(hwnd);
@@ -1835,6 +1947,46 @@ void SetStatus(std::wstring text, AppState::StatusKind kind) {
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
+void RefreshMainBackdrop() {
+    if (!g_app.hwnd) return;
+    if (IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd)) return;
+
+    ScreenFrame frame;
+    std::wstring error;
+    std::vector<uint32_t> pixels;
+    int width = 0;
+    int height = 0;
+    const bool captured = CaptureScreen(&frame, &error) &&
+                          BuildGlassImage(frame, 20, &pixels, &width, &height);
+
+    g_app.glassBitmap.Reset();
+    if (!captured) {
+        g_app.glassPixels.clear();
+        g_app.glassWidth = 0;
+        g_app.glassHeight = 0;
+        g_app.glassAvailable = false;
+        if (g_app.compositionMode && g_app.rt) EnableSystemBackdrop(g_app.hwnd);
+        UpdatePalette();
+        InvalidateRect(g_app.hwnd, nullptr, FALSE);
+        return;
+    }
+
+    g_app.glassPixels = std::move(pixels);
+    g_app.glassWidth = width;
+    g_app.glassHeight = height;
+    g_app.glassScreenX = frame.x;
+    g_app.glassScreenY = frame.y;
+    g_app.glassScreenWidth = frame.width;
+    g_app.glassScreenHeight = frame.height;
+    g_app.glassAvailable = true;
+    if (g_app.rt) {
+        CreateGlassBitmap();
+    } else {
+        UpdatePalette();
+    }
+    InvalidateRect(g_app.hwnd, nullptr, FALSE);
+}
+
 void ApplyWindowTheme(HWND hwnd, bool dark) {
     if (!hwnd) return;
     const BOOL useDark = dark ? TRUE : FALSE;
@@ -1850,6 +2002,9 @@ void RefreshTheme() {
     g_app.dark = g_app.systemDark;
     UpdatePalette();
     ApplyWindowTheme(g_app.hwnd, g_app.dark);
+    if (g_app.compositionMode && g_app.rt && g_app.hwnd) {
+        EnableSystemBackdrop(g_app.hwnd);
+    }
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
@@ -1861,6 +2016,9 @@ void SetThemeMode(ThemeMode mode) {
     UpdatePalette();
     SaveThemeMode(mode);
     ApplyWindowTheme(g_app.hwnd, dark);
+    if (g_app.compositionMode && g_app.rt && g_app.hwnd) {
+        EnableSystemBackdrop(g_app.hwnd);
+    }
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
@@ -2023,11 +2181,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             g_app.launchedHidden = false;
             g_app.settingsNotice = L"托盘图标创建失败，已显示主窗口";
             g_app.settingsNoticeError = true;
+            RefreshMainBackdrop();
             ShowWindow(hwnd, SW_SHOW);
             ApplyWindowIcons(hwnd);
             UpdateWindow(hwnd);
         }
     } else {
+        RefreshMainBackdrop();
         ShowWindow(hwnd, showCommand == SW_SHOWMAXIMIZED ? SW_SHOWNORMAL : showCommand);
         ApplyWindowIcons(hwnd);
         UpdateWindow(hwnd);

@@ -2,6 +2,7 @@
 
 #include "app.h"
 #include "capture.h"
+#include "glass.h"
 #include "qr.h"
 #include "url.h"
 #include "version.h"
@@ -165,83 +166,6 @@ void FillRounded(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_
                  float radius, const D2D1_COLOR_F& color) {
     SetBrushColor(brush, color);
     rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), brush);
-}
-
-void BuildBackdropBlur(OverlayState* state) {
-    const ScreenFrame& frame = state->frame;
-    if (frame.width <= 0 || frame.height <= 0 || frame.bgra.empty()) return;
-
-    constexpr int kFactor = 16;
-    const int width = std::max(1, (frame.width + kFactor - 1) / kFactor);
-    const int height = std::max(1, (frame.height + kFactor - 1) / kFactor);
-    std::vector<uint32_t> small(static_cast<size_t>(width) * height);
-    const uint8_t* source = reinterpret_cast<const uint8_t*>(frame.bgra.data());
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            uint64_t red = 0;
-            uint64_t green = 0;
-            uint64_t blue = 0;
-            uint64_t count = 0;
-            const int y0 = y * kFactor;
-            const int x0 = x * kFactor;
-            const int y1 = std::min(frame.height, y0 + kFactor);
-            const int x1 = std::min(frame.width, x0 + kFactor);
-            for (int py = y0; py < y1; py += 2) {
-                const uint8_t* row = source + static_cast<size_t>(py) * frame.width * 4;
-                for (int px = x0; px < x1; px += 2) {
-                    const uint8_t* pixel = row + static_cast<size_t>(px) * 4;
-                    blue += pixel[0];
-                    green += pixel[1];
-                    red += pixel[2];
-                    ++count;
-                }
-            }
-            if (count == 0) count = 1;
-            const uint8_t r = static_cast<uint8_t>(red / count);
-            const uint8_t g = static_cast<uint8_t>(green / count);
-            const uint8_t b = static_cast<uint8_t>(blue / count);
-            uint8_t* out = reinterpret_cast<uint8_t*>(&small[static_cast<size_t>(y) * width + x]);
-            out[0] = b;
-            out[1] = g;
-            out[2] = r;
-            out[3] = 255;
-        }
-    }
-
-    std::vector<uint32_t> blurred(small.size());
-    for (int pass = 0; pass < 2; ++pass) {
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                uint32_t b = 0;
-                uint32_t g = 0;
-                uint32_t r = 0;
-                uint32_t count = 0;
-                for (int dy = -1; dy <= 1; ++dy) {
-                    const int sy = ClampInt(y + dy, 0, height - 1);
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        const int sx = ClampInt(x + dx, 0, width - 1);
-                        const uint8_t* pixel = reinterpret_cast<const uint8_t*>(
-                            &small[static_cast<size_t>(sy) * width + sx]);
-                        b += pixel[0];
-                        g += pixel[1];
-                        r += pixel[2];
-                        ++count;
-                    }
-                }
-                uint8_t* out = reinterpret_cast<uint8_t*>(&blurred[static_cast<size_t>(y) * width + x]);
-                out[0] = static_cast<uint8_t>(b / count);
-                out[1] = static_cast<uint8_t>(g / count);
-                out[2] = static_cast<uint8_t>(r / count);
-                out[3] = 255;
-            }
-        }
-        small.swap(blurred);
-    }
-
-    state->blurWidth = width;
-    state->blurHeight = height;
-    state->blurPixels = std::move(small);
 }
 
 void DrawAcrylicPanel(ID2D1RenderTarget* rt, const OverlayState& state, const D2D1_RECT_F& rect,
@@ -495,6 +419,7 @@ void RestoreMainWindow(bool activate) {
         ShowWindow(g_app.hwnd, SW_HIDE);
         return;
     }
+    RefreshMainBackdrop();
     ShowWindow(g_app.hwnd, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
     if (activate) {
         SetForegroundWindow(g_app.hwnd);
@@ -1387,7 +1312,14 @@ void StartScan(ScanMode mode) {
 
     state.uiScale = std::max(1.0f, static_cast<float>(DpiOfWindow(g_app.hwnd)) / 96.0f);
     state.primaryPx = PrimaryMonitorRectRelativeTo(state.frame);
-    BuildBackdropBlur(&state);
+    std::vector<uint32_t> glassPixels;
+    int glassWidth = 0;
+    int glassHeight = 0;
+    if (BuildGlassImage(state.frame, 16, &glassPixels, &glassWidth, &glassHeight)) {
+        state.blurPixels = std::move(glassPixels);
+        state.blurWidth = glassWidth;
+        state.blurHeight = glassHeight;
+    }
 
     if (mode == ScanMode::Fullscreen) {
         PrepareFullscreenResults(&state);
