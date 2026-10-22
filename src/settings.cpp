@@ -31,6 +31,44 @@ bool WriteDword(const wchar_t* name, DWORD value) {
     return status == ERROR_SUCCESS;
 }
 
+std::wstring ReadString(const wchar_t* name) {
+    DWORD size = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, kAppRegistryPath, name, RRF_RT_REG_SZ, nullptr, nullptr,
+                     &size) != ERROR_SUCCESS ||
+        size < sizeof(wchar_t)) {
+        return std::wstring();
+    }
+    std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, kAppRegistryPath, name, RRF_RT_REG_SZ, nullptr,
+                     buffer.data(), &size) != ERROR_SUCCESS) {
+        return std::wstring();
+    }
+    return std::wstring(buffer.data());
+}
+
+bool WriteString(const wchar_t* name, const std::wstring& value) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kAppRegistryPath, 0, nullptr, 0, KEY_SET_VALUE, nullptr,
+                        &key, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    const LSTATUS status = RegSetValueExW(
+        key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+        static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    return status == ERROR_SUCCESS;
+}
+
+void DeleteValue(const wchar_t* name) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kAppRegistryPath, 0, KEY_SET_VALUE, &key) !=
+        ERROR_SUCCESS) {
+        return;
+    }
+    RegDeleteValueW(key, name);
+    RegCloseKey(key);
+}
+
 std::wstring ExecutablePath() {
     std::vector<wchar_t> buffer(MAX_PATH);
     for (;;) {
@@ -175,12 +213,32 @@ bool LoadCloseToTray() {
 
 void SaveCloseToTray(bool enabled) { WriteDword(L"CloseToTray", enabled ? 1u : 0u); }
 
-bool LoadTranslucency() {
-    DWORD value = 1;
-    return !ReadDword(L"Translucency", &value) || value != 0;
+GlassMode LoadGlassMode() {
+    DWORD value = static_cast<DWORD>(GlassMode::Static);
+    if (ReadDword(L"GlassMode", &value) && value <= 2) {
+        return static_cast<GlassMode>(value);
+    }
+
+    // Migrate installations that only have the former on/off switch.
+    DWORD legacy = 1;
+    if (ReadDword(L"Translucency", &legacy)) {
+        return legacy ? GlassMode::Static : GlassMode::None;
+    }
+    return GlassMode::Static;
 }
 
-void SaveTranslucency(bool enabled) { WriteDword(L"Translucency", enabled ? 1u : 0u); }
+void SaveGlassMode(GlassMode mode) {
+    WriteDword(L"GlassMode", static_cast<DWORD>(mode));
+    WriteDword(L"Translucency", mode == GlassMode::None ? 0u : 1u);
+}
+
+std::wstring LoadPendingUpdateVersion() { return ReadString(L"PendingUpdateVersion"); }
+
+void SavePendingUpdateVersion(const std::wstring& version) {
+    WriteString(L"PendingUpdateVersion", version);
+}
+
+void ClearPendingUpdateVersion() { DeleteValue(L"PendingUpdateVersion"); }
 
 bool IsAutoStartEnabled() {
     HKEY key = nullptr;

@@ -14,6 +14,7 @@
 AppState g_app;
 
 void RefreshMainBackdropForDrag(HWND hwnd);
+bool CaptureMainBackdropNow();
 
 namespace {
 
@@ -30,7 +31,9 @@ constexpr UINT kUpdateReadyMessage = WM_APP + 31;
 constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
 constexpr UINT_PTR kViewAnimationTimer = 2;
+constexpr UINT_PTR kUpdateLaunchTimer = 3;
 constexpr UINT kViewAnimationDurationMs = 200;
+constexpr UINT kUpdateLaunchTimeoutMs = 90000;
 constexpr DWORD kDwmaCloak = 13;  // DWMWA_CLOAK
 constexpr int kMainGlassFactor = 20;
 
@@ -60,7 +63,9 @@ enum ControlId : int {
     kHotkeyFullscreenControl = 16,
     kHotkeyRegionControl = 17,
     kUpdateButton = 18,
-    kTranslucencyControl = 19,
+    kGlassNone = 19,
+    kGlassStatic = 20,
+    kGlassDynamic = 21,
 };
 
 const D2D1_RECT_F kTileRects[2] = {
@@ -78,15 +83,18 @@ const D2D1_RECT_F kThemeRects[3] = {
     D2D1::RectF(144.0f, 82.0f, 256.0f, 116.0f),
     D2D1::RectF(264.0f, 82.0f, 376.0f, 116.0f),
 };
-const D2D1_RECT_F kTranslucencyRow = D2D1::RectF(24.0f, 124.0f, 376.0f, 158.0f);
-const D2D1_RECT_F kTranslucencySwitch = D2D1::RectF(328.0f, 128.0f, 376.0f, 154.0f);
-const D2D1_RECT_F kCloseToTrayRow = D2D1::RectF(24.0f, 196.0f, 376.0f, 230.0f);
-const D2D1_RECT_F kCloseToTraySwitch = D2D1::RectF(328.0f, 200.0f, 376.0f, 226.0f);
-const D2D1_RECT_F kAutoStartRow = D2D1::RectF(24.0f, 234.0f, 376.0f, 268.0f);
-const D2D1_RECT_F kAutoStartSwitch = D2D1::RectF(328.0f, 238.0f, 376.0f, 264.0f);
-const D2D1_RECT_F kHotkeyFullscreenButton = D2D1::RectF(196.0f, 314.0f, 376.0f, 348.0f);
-const D2D1_RECT_F kHotkeyRegionButton = D2D1::RectF(196.0f, 352.0f, 376.0f, 386.0f);
-const D2D1_RECT_F kUpdateButtonRect = D2D1::RectF(236.0f, 448.0f, 376.0f, 480.0f);
+const D2D1_RECT_F kGlassRects[3] = {
+    D2D1::RectF(24.0f, 124.0f, 136.0f, 158.0f),
+    D2D1::RectF(144.0f, 124.0f, 256.0f, 158.0f),
+    D2D1::RectF(264.0f, 124.0f, 376.0f, 158.0f),
+};
+const D2D1_RECT_F kCloseToTrayRow = D2D1::RectF(24.0f, 206.0f, 376.0f, 240.0f);
+const D2D1_RECT_F kCloseToTraySwitch = D2D1::RectF(328.0f, 210.0f, 376.0f, 236.0f);
+const D2D1_RECT_F kAutoStartRow = D2D1::RectF(24.0f, 244.0f, 376.0f, 278.0f);
+const D2D1_RECT_F kAutoStartSwitch = D2D1::RectF(328.0f, 248.0f, 376.0f, 274.0f);
+const D2D1_RECT_F kHotkeyFullscreenButton = D2D1::RectF(196.0f, 322.0f, 376.0f, 356.0f);
+const D2D1_RECT_F kHotkeyRegionButton = D2D1::RectF(196.0f, 360.0f, 376.0f, 394.0f);
+const D2D1_RECT_F kUpdateButtonRect = D2D1::RectF(236.0f, 454.0f, 376.0f, 486.0f);
 
 float ClientHeightForView() {
     return g_app.view == MainView::Settings ? kSettingsClientHeight : kHomeClientHeight;
@@ -241,10 +249,39 @@ void DisableSystemBackdrop(HWND hwnd) {
     SetAccentPolicy(hwnd, 0, 0);
     int backdrop = 1;  // DWMSBT_NONE
     DwmSetWindowAttribute(hwnd, 38, &backdrop, sizeof(backdrop));
+    MARGINS margins{0, 0, 0, 0};
+    DwmExtendFrameIntoClientArea(hwnd, &margins);
     g_app.backdropEnabled = false;
+    g_app.dynamicBackdrop = false;
 }
 
-void EnableSystemBackdrop(HWND hwnd) {
+bool EnableDynamicBackdrop(HWND hwnd) {
+    if (!hwnd || !g_app.compositionMode) return false;
+
+    MARGINS margins{-1, -1, -1, -1};
+    DwmExtendFrameIntoClientArea(hwnd, &margins);
+    int none = 1;  // DWMSBT_NONE
+    DwmSetWindowAttribute(hwnd, 38, &none, sizeof(none));
+    SetAccentPolicy(hwnd, 0, 0);
+
+    // The documented Windows 11 Acrylic backdrop samples the desktop live in the
+    // compositor, so it follows video and drags without any app-side capture.
+    bool applied = false;
+    int backdrop = 3;  // DWMSBT_TRANSIENTWINDOW (Acrylic)
+    if (SUCCEEDED(DwmSetWindowAttribute(hwnd, 38, &backdrop, sizeof(backdrop)))) {
+        applied = true;
+    } else {
+        applied = ApplyAccentAcrylic(hwnd);
+    }
+
+    g_app.backdropEnabled = applied;
+    g_app.dynamicBackdrop = applied;
+    UpdatePalette();
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return applied;
+}
+
+void EnableStaticBackdropFallback(HWND hwnd) {
     if (!hwnd || !g_app.compositionMode) return;
 
     MARGINS margins{-1, -1, -1, -1};
@@ -259,6 +296,7 @@ void EnableSystemBackdrop(HWND hwnd) {
     }
 
     g_app.backdropEnabled = applied;
+    g_app.dynamicBackdrop = false;
     UpdatePalette();
     InvalidateRect(hwnd, nullptr, FALSE);
 }
@@ -374,7 +412,11 @@ bool InitializeCompositionRenderer(HWND hwnd, UINT width, UINT height) {
 
     g_app.compositionMode = true;
     CreateGlassBitmap();
-    if (g_app.translucent && !g_app.glassAvailable) EnableSystemBackdrop(hwnd);
+    if (g_app.glassMode == GlassMode::Dynamic) {
+        EnableDynamicBackdrop(hwnd);
+    } else if (GlassEnabled() && !g_app.glassAvailable) {
+        EnableStaticBackdropFallback(hwnd);
+    }
     UpdatePalette();
     return true;
 }
@@ -456,13 +498,28 @@ void DiscardRenderTarget() {
 
 void UpdatePalette() {
     g_app.palette = MakePalette(g_app.dark);
-    if (!g_app.translucent || (!g_app.backdropEnabled && !g_app.glassAvailable)) return;
-    g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.42f : 0.62f);
-    g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.72f : 0.80f);
-    g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, g_app.dark ? 0.82f : 0.88f);
-    g_app.palette.cardPressed = WithAlpha(g_app.palette.cardPressed, g_app.dark ? 0.78f : 0.84f);
-    g_app.palette.border = WithAlpha(g_app.palette.border, 0.68f);
-    g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, 0.64f);
+    if (!GlassEnabled()) return;
+
+    const bool live =
+        g_app.compositionMode && g_app.glassMode == GlassMode::Dynamic && g_app.dynamicBackdrop;
+    if (!live && !g_app.backdropEnabled && !g_app.glassAvailable) return;
+    if (live) {
+        // The compositor already supplies the Acrylic tint and blur; keep our own
+        // layers light so the live background stays visible.
+        g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.18f : 0.30f);
+        g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.56f : 0.70f);
+        g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, g_app.dark ? 0.66f : 0.78f);
+        g_app.palette.cardPressed = WithAlpha(g_app.palette.cardPressed, g_app.dark ? 0.62f : 0.74f);
+        g_app.palette.border = WithAlpha(g_app.palette.border, 0.58f);
+        g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, 0.54f);
+    } else {
+        g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.42f : 0.62f);
+        g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.72f : 0.80f);
+        g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, g_app.dark ? 0.82f : 0.88f);
+        g_app.palette.cardPressed = WithAlpha(g_app.palette.cardPressed, g_app.dark ? 0.78f : 0.84f);
+        g_app.palette.border = WithAlpha(g_app.palette.border, 0.68f);
+        g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, 0.64f);
+    }
     if (!g_app.dark) {
         g_app.palette.secondary = Rgb(0x3F3F3F);
         g_app.palette.tertiary = Rgb(0x666666);
@@ -471,7 +528,7 @@ void UpdatePalette() {
 
 bool CreateGlassBitmap() {
     g_app.glassBitmap.Reset();
-    if (!g_app.translucent || !g_app.rt || g_app.glassWidth <= 0 || g_app.glassHeight <= 0 ||
+    if (!GlassEnabled() || !g_app.rt || g_app.glassWidth <= 0 || g_app.glassHeight <= 0 ||
         g_app.glassPixels.empty()) {
         g_app.glassAvailable = false;
         UpdatePalette();
@@ -536,7 +593,7 @@ bool UsesHandCursor(int control) {
 void CancelHotkeyCapture(bool restoreHotkeys);
 void BeginHotkeyCapture(bool fullscreen);
 void SetCloseToTrayEnabled(bool enabled);
-void SetTranslucencyEnabled(bool enabled);
+void SetGlassMode(GlassMode mode);
 void ToggleAutoStart();
 void ShowMainFromTray(HWND hwnd);
 void HideToTray(HWND hwnd);
@@ -654,7 +711,9 @@ int ControlAt(float x, float y) {
     for (int i = 0; i < 3; ++i) {
         if (PointInRect(kThemeRects[i], x, y)) return kThemeSystem + i;
     }
-    if (PointInRect(kTranslucencyRow, x, y)) return kTranslucencyControl;
+    for (int i = 0; i < 3; ++i) {
+        if (PointInRect(kGlassRects[i], x, y)) return kGlassNone + i;
+    }
     if (PointInRect(kCloseToTrayRow, x, y)) return kCloseToTrayControl;
     if (PointInRect(kAutoStartRow, x, y)) return kAutoStartControl;
     if (PointInRect(kHotkeyFullscreenButton, x, y)) return kHotkeyFullscreenControl;
@@ -665,8 +724,8 @@ int ControlAt(float x, float y) {
 
 std::vector<int> FocusOrder() {
     if (g_app.view == MainView::Home) return {kFullScreen, kRegion, kSettings};
-    return {kBack, kThemeSystem, kThemeLight, kThemeDark, kTranslucencyControl,
-            kCloseToTrayControl, kAutoStartControl, kHotkeyFullscreenControl,
+    return {kBack, kThemeSystem, kThemeLight, kThemeDark, kGlassNone, kGlassStatic,
+            kGlassDynamic, kCloseToTrayControl, kAutoStartControl, kHotkeyFullscreenControl,
             kHotkeyRegionControl, kUpdateButton};
 }
 
@@ -936,6 +995,59 @@ void DrawThemeButton(ID2D1RenderTarget* rt, int index) {
     }
 }
 
+const wchar_t* GlassLabel(GlassMode mode) {
+    switch (mode) {
+        case GlassMode::None:
+            return L"无模糊";
+        case GlassMode::Dynamic:
+            return L"动态模糊";
+        default:
+            return L"静态模糊";
+    }
+}
+
+void DrawGlassButton(ID2D1RenderTarget* rt, int index) {
+    const int control = kGlassNone + index;
+    const D2D1_RECT_F rect = kGlassRects[index];
+    const GlassMode mode = static_cast<GlassMode>(index);
+    const bool selected = g_app.glassMode == mode;
+    const bool hovered = g_app.hoverControl == control;
+    const bool pressed = g_app.pressedControl == control;
+    const bool focused = IsFocused(control);
+
+    D2D1_COLOR_F fill = g_app.palette.card;
+    if (selected) {
+        fill = g_app.palette.accentSoftHover;
+    } else if (pressed) {
+        fill = g_app.palette.cardPressed;
+    } else if (hovered) {
+        fill = g_app.palette.cardHover;
+    }
+    SetBrushColor(g_app.brush.Get(), fill);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 9.0f, 9.0f), g_app.brush.Get());
+
+    SetBrushColor(g_app.brush.Get(),
+                  selected || focused ? g_app.palette.accent
+                                      : (hovered ? g_app.palette.borderHover
+                                                 : g_app.palette.border));
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 9.0f, 9.0f), g_app.brush.Get(),
+                             selected || focused ? 1.4f : 1.0f);
+
+    SetBrushColor(g_app.brush.Get(),
+                  selected || hovered || focused ? g_app.palette.accent : g_app.palette.secondary);
+    DrawTextEx(rt, g_app.dwrite.Get(), GlassLabel(mode), g_app.fonts.chip.Get(),
+               D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom), g_app.brush.Get(),
+               TextAlign::Center, true, true);
+
+    if (focused) {
+        const D2D1_RECT_F focusRect =
+            D2D1::RectF(rect.left + 2.0f, rect.top + 2.0f, rect.right - 2.0f, rect.bottom - 2.0f);
+        SetBrushColor(g_app.brush.Get(), g_app.palette.accent);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(focusRect, 7.0f, 7.0f), g_app.brush.Get(),
+                                 1.4f);
+    }
+}
+
 void FillRoundedRect(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, float radius,
                      const D2D1_COLOR_F& color) {
     SetBrushColor(g_app.brush.Get(), color);
@@ -1029,7 +1141,8 @@ void DrawHotkeyButton(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, const std:
 
 void DrawUpdateButton(ID2D1RenderTarget* rt) {
     const bool busy = g_app.updateState == UpdateState::Checking ||
-                      g_app.updateState == UpdateState::Downloading;
+                      g_app.updateState == UpdateState::Downloading ||
+                      g_app.updateState == UpdateState::Launching;
     const bool hovered = g_app.hoverControl == kUpdateButton;
     const bool pressed = g_app.pressedControl == kUpdateButton;
 
@@ -1040,6 +1153,9 @@ void DrawUpdateButton(ID2D1RenderTarget* rt) {
             break;
         case UpdateState::Downloading:
             label = L"正在下载…";
+            break;
+        case UpdateState::Launching:
+            label = L"正在启动安装程序…";
             break;
         case UpdateState::Available:
             label = L"更新到 v" + g_app.updateVersion;
@@ -1079,20 +1195,30 @@ void DrawSettings(ID2D1RenderTarget* rt) {
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"外观", g_app.fonts.label.Get(),
+    DrawTextEx(rt, g_app.dwrite.Get(), L"外观与模糊", g_app.fonts.label.Get(),
                D2D1::RectF(24.0f, 64.0f, 200.0f, 80.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
     for (int i = 0; i < 3; ++i) DrawThemeButton(rt, i);
-    DrawToggleRow(rt, kTranslucencyRow, kTranslucencySwitch, L"半透明玻璃效果",
-                  kTranslucencyControl, g_app.translucent);
+    for (int i = 0; i < 3; ++i) DrawGlassButton(rt, i);
+
+    std::wstring glassNote = L"静态在拖动时重新采样 · 动态使用系统实时 Acrylic";
+    D2D1_COLOR_F glassNoteColor = g_app.palette.tertiary;
+    if (g_app.glassMode == GlassMode::Dynamic && !g_app.dynamicBackdrop) {
+        glassNote = L"当前系统不支持动态 Acrylic，已回退到静态采样";
+        glassNoteColor = g_app.palette.secondary;
+    }
+    SetBrushColor(g_app.brush.Get(), glassNoteColor);
+    DrawTextEx(rt, g_app.dwrite.Get(), glassNote, g_app.fonts.chipSmall.Get(),
+               D2D1::RectF(24.0f, 160.0f, 376.0f, 176.0f), g_app.brush.Get(),
+               TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 170.0f), D2D1::Point2F(kClientWidth - 24.0f, 170.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 182.0f), D2D1::Point2F(kClientWidth - 24.0f, 182.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"常规", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 180.0f, 200.0f, 198.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 190.0f, 200.0f, 208.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
     DrawToggleRow(rt, kCloseToTrayRow, kCloseToTraySwitch, L"关闭窗口时最小化到托盘",
                   kCloseToTrayControl, g_app.closeToTray);
@@ -1100,12 +1226,12 @@ void DrawSettings(ID2D1RenderTarget* rt) {
                   kAutoStartControl, g_app.autoStart);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 280.0f), D2D1::Point2F(kClientWidth - 24.0f, 280.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 290.0f), D2D1::Point2F(kClientWidth - 24.0f, 290.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"快捷键", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 290.0f, 200.0f, 308.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 298.0f, 200.0f, 316.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
@@ -1139,21 +1265,21 @@ void DrawSettings(ID2D1RenderTarget* rt) {
     }
     SetBrushColor(g_app.brush.Get(), noteColor);
     DrawTextEx(rt, g_app.dwrite.Get(), note, g_app.fonts.chipSmall.Get(),
-               D2D1::RectF(24.0f, 390.0f, 376.0f, 408.0f), g_app.brush.Get(),
+               D2D1::RectF(24.0f, 398.0f, 376.0f, 416.0f), g_app.brush.Get(),
                TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 416.0f), D2D1::Point2F(kClientWidth - 24.0f, 416.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 424.0f), D2D1::Point2F(kClientWidth - 24.0f, 424.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"关于与更新", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 426.0f, 200.0f, 444.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 432.0f, 200.0f, 450.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
     DrawTextEx(rt, g_app.dwrite.Get(), L"EasyQR " EASYQR_VERSION_STRING, g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 452.0f, 220.0f, 472.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 458.0f, 220.0f, 478.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
     DrawUpdateButton(rt);
@@ -1169,18 +1295,18 @@ void DrawSettings(ID2D1RenderTarget* rt) {
     }
     SetBrushColor(g_app.brush.Get(), updateColor);
     DrawTextEx(rt, g_app.dwrite.Get(), updateText, g_app.fonts.chipSmall.Get(),
-               D2D1::RectF(24.0f, 484.0f, 376.0f, 502.0f), g_app.brush.Get(),
+               D2D1::RectF(24.0f, 490.0f, 376.0f, 508.0f), g_app.brush.Get(),
                TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"图像与扫描结果仅在本机内存中处理，不作保存。",
-               g_app.fonts.footer.Get(), D2D1::RectF(24.0f, 510.0f, 376.0f, 526.0f),
+               g_app.fonts.footer.Get(), D2D1::RectF(24.0f, 516.0f, 376.0f, 532.0f),
                g_app.brush.Get(), TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.tertiary);
     DrawTextEx(rt, g_app.dwrite.Get(),
                L"MIT License · ZXing-C++ + quirc · 设置卸载时删除",
-               g_app.fonts.chipSmall.Get(), D2D1::RectF(24.0f, 528.0f, 376.0f, 544.0f),
+               g_app.fonts.chipSmall.Get(), D2D1::RectF(24.0f, 534.0f, 376.0f, 550.0f),
                g_app.brush.Get(), TextAlign::Leading, true, true);
 }
 
@@ -1210,10 +1336,21 @@ void PaintMainWindow(HWND hwnd) {
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    if (g_app.translucent && g_app.glassBitmap) {
+    const bool liveBackdrop = g_app.compositionMode &&
+                              g_app.glassMode == GlassMode::Dynamic && g_app.dynamicBackdrop;
+    if (GlassEnabled() && liveBackdrop) {
+        rt->Clear(D2D1::ColorF(0, 0.0f));
+        SetBrushColor(g_app.brush.Get(), g_app.palette.page);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        rt->FillRectangle(
+            D2D1::RectF(0.0f, 0.0f, static_cast<float>(client.right),
+                        static_cast<float>(client.bottom)),
+            g_app.brush.Get());
+    } else if (GlassEnabled() && g_app.glassBitmap) {
         rt->Clear(g_app.palette.page);
         DrawGlassBackground(rt, hwnd);
-    } else if (g_app.translucent && g_app.backdropEnabled) {
+    } else if (GlassEnabled() && g_app.backdropEnabled) {
         rt->Clear(D2D1::ColorF(0, 0.0f));
         SetBrushColor(g_app.brush.Get(), g_app.palette.page);
         RECT client{};
@@ -1298,16 +1435,17 @@ void ActivateControl(int control) {
         g_app.focusControl = control;
         return;
     }
+    if (control >= kGlassNone && control <= kGlassDynamic) {
+        SetGlassMode(static_cast<GlassMode>(control - kGlassNone));
+        g_app.focusControl = control;
+        return;
+    }
     if (control == kCloseToTrayControl) {
         SetCloseToTrayEnabled(!g_app.closeToTray);
         return;
     }
     if (control == kAutoStartControl) {
         ToggleAutoStart();
-        return;
-    }
-    if (control == kTranslucencyControl) {
-        SetTranslucencyEnabled(!g_app.translucent);
         return;
     }
     if (control == kHotkeyFullscreenControl) {
@@ -1610,42 +1748,79 @@ void ToggleAutoStart() {
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
-void SetTranslucencyEnabled(bool enabled) {
-    if (g_app.translucent == enabled) return;
-    if (g_app.viewAnimationActive) CompleteViewAnimation(g_app.hwnd);
-    g_app.translucent = enabled;
-    SaveTranslucency(enabled);
+bool CaptureStaticBackdropWithHiddenWindow(HWND hwnd) {
+    const bool wasVisible = hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    if (wasVisible) {
+        ShowWindow(hwnd, SW_HIDE);
+        DwmFlush();
+        Sleep(40);
+    }
+    const bool captured = CaptureMainBackdropNow();
+    if (wasVisible) {
+        ShowWindow(hwnd, SW_SHOW);
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+        UpdateWindow(hwnd);
+    }
+    return captured;
+}
 
-    if (!enabled) {
+void SetGlassMode(GlassMode mode) {
+    if (g_app.glassMode == mode) return;
+    HWND hwnd = g_app.hwnd;
+    if (hwnd && g_app.viewAnimationActive) CompleteViewAnimation(hwnd);
+
+    g_app.glassMode = mode;
+    SaveGlassMode(mode);
+
+    if (mode == GlassMode::None) {
         g_app.glassBitmap.Reset();
         g_app.glassAvailable = false;
-        if (g_app.compositionMode) DisableSystemBackdrop(g_app.hwnd);
+        g_app.glassPixels.clear();
+        if (hwnd) DisableSystemBackdrop(hwnd);
         UpdatePalette();
-        if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
+        if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
         return;
     }
 
+    if (mode == GlassMode::Dynamic) {
+        g_app.glassBitmap.Reset();
+        g_app.glassAvailable = false;
+        g_app.glassPixels.clear();
+        if (hwnd) {
+            EnsureRenderTarget(hwnd);
+            if (EnableDynamicBackdrop(hwnd)) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return;
+            }
+            // Live Acrylic is unavailable (older build or compositor failure);
+            // keep the mode selected but use the sampled backdrop instead.
+            if (!CaptureStaticBackdropWithHiddenWindow(hwnd) && g_app.compositionMode &&
+                g_app.rt) {
+                EnableStaticBackdropFallback(hwnd);
+            }
+        }
+        UpdatePalette();
+        if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+
+    if (hwnd) DisableSystemBackdrop(hwnd);
+    g_app.glassBitmap.Reset();
+    g_app.glassAvailable = false;
     if (!g_app.glassPixels.empty()) {
         if (g_app.rt) {
             CreateGlassBitmap();
         } else {
             g_app.glassAvailable = true;
-            UpdatePalette();
         }
-        if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
-        return;
+    } else if (hwnd) {
+        if (!CaptureStaticBackdropWithHiddenWindow(hwnd) && g_app.compositionMode && g_app.rt) {
+            EnableStaticBackdropFallback(hwnd);
+        }
     }
-
-    if (!g_app.hwnd) return;
-    HWND hwnd = g_app.hwnd;
-    ShowWindow(hwnd, SW_HIDE);
-    DwmFlush();
-    Sleep(40);
-    RefreshMainBackdrop();
-    ShowWindow(hwnd, SW_SHOW);
-    SetForegroundWindow(hwnd);
-    SetFocus(hwnd);
-    UpdateWindow(hwnd);
+    UpdatePalette();
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 void JoinUpdateThread() {
@@ -1690,7 +1865,8 @@ void StartUpdateDownload(HWND hwnd) {
 
 void BeginUpdateAction(HWND hwnd) {
     if (g_app.updateState == UpdateState::Checking ||
-        g_app.updateState == UpdateState::Downloading) {
+        g_app.updateState == UpdateState::Downloading ||
+        g_app.updateState == UpdateState::Launching) {
         return;
     }
     if (g_app.updateState == UpdateState::Available) {
@@ -1734,13 +1910,24 @@ void HandleUpdateReadyResult(HWND hwnd, UpdatePrepareResult* result) {
 
     std::wstring error;
     if (result->installer) {
+        SavePendingUpdateVersion(g_app.updateVersion);
         if (StartInstaller(result->filePath, &error)) {
+            g_app.updateState = UpdateState::Launching;
+            g_app.updateMessage = L"等待管理员授权，完成后会自动重新打开";
+            if (hwnd) {
+                SetTimer(hwnd, kUpdateLaunchTimer, kUpdateLaunchTimeoutMs, nullptr);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return;
+        }
+        ClearPendingUpdateVersion();
+    } else {
+        SavePendingUpdateVersion(g_app.updateVersion);
+        if (ApplyPortableUpdate(result->filePath, &error)) {
             QuitApplication(hwnd);
             return;
         }
-    } else if (ApplyPortableUpdate(result->filePath, &error)) {
-        QuitApplication(hwnd);
-        return;
+        ClearPendingUpdateVersion();
     }
     g_app.updateState = UpdateState::Error;
     g_app.updateMessage = error;
@@ -1840,6 +2027,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             HandleUpdateReadyResult(hwnd, reinterpret_cast<UpdatePrepareResult*>(lParam));
             return 0;
         case kQuitForInstallerMessage:
+            KillTimer(hwnd, kUpdateLaunchTimer);
             g_app.quitting = true;
             g_app.hotkeyCapture = AppState::HotkeyCapture::None;
             UnregisterConfiguredHotkeys();
@@ -1858,6 +2046,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             PaintMainWindow(hwnd);
             return 0;
         case WM_TIMER:
+            if (wParam == kUpdateLaunchTimer) {
+                KillTimer(hwnd, kUpdateLaunchTimer);
+                if (g_app.updateState == UpdateState::Launching) {
+                    ClearPendingUpdateVersion();
+                    g_app.updateState = UpdateState::Error;
+                    g_app.updateMessage = L"更新程序未响应，请重试";
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                return 0;
+            }
             if (wParam == kViewAnimationTimer && g_app.viewAnimationActive) {
                 const double elapsed =
                     static_cast<double>(GetTickCount64() - g_app.viewAnimationStart);
@@ -1964,7 +2162,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             RefreshMainBackdropForDrag(hwnd);
             break;
         case WM_MOVE:
-            if (g_app.translucent && g_app.glassAvailable) {
+            if (GlassEnabled() && g_app.glassAvailable) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 UpdateWindow(hwnd);
             }
@@ -2079,6 +2277,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 if (g_app.view == MainView::Home) {
                     g_app.focusControl = wParam == VK_LEFT ? kFullScreen : kRegion;
                     InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (g_app.focusControl >= kGlassNone &&
+                           g_app.focusControl <= kGlassDynamic) {
+                    int selected = static_cast<int>(g_app.glassMode);
+                    selected = (selected + (wParam == VK_RIGHT ? 1 : 2)) % 3;
+                    SetGlassMode(static_cast<GlassMode>(selected));
+                    g_app.focusControl = kGlassNone + selected;
                 } else {
                     int selected = static_cast<int>(g_app.themeMode);
                     selected = (selected + (wParam == VK_RIGHT ? 1 : 2)) % 3;
@@ -2181,13 +2385,30 @@ bool CaptureMainBackdropNow() {
 
 void RefreshMainBackdrop() {
     if (!g_app.hwnd) return;
-    if (!g_app.translucent) {
+    if (!GlassEnabled()) {
         g_app.glassBitmap.Reset();
         g_app.glassAvailable = false;
+        DisableSystemBackdrop(g_app.hwnd);
         UpdatePalette();
         return;
     }
-    if (IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd)) return;
+
+    if (g_app.glassMode == GlassMode::Dynamic) {
+        if (g_app.dynamicBackdrop || EnableDynamicBackdrop(g_app.hwnd)) {
+            InvalidateRect(g_app.hwnd, nullptr, FALSE);
+            return;
+        }
+        g_app.glassBitmap.Reset();
+        g_app.glassAvailable = false;
+        if (IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd) &&
+            !g_app.glassPixels.empty()) {
+            UpdatePalette();
+            InvalidateRect(g_app.hwnd, nullptr, FALSE);
+            return;
+        }
+    } else if (IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd)) {
+        return;
+    }
 
     g_app.glassBitmap.Reset();
     if (!CaptureMainBackdropNow()) {
@@ -2195,8 +2416,12 @@ void RefreshMainBackdrop() {
         g_app.glassWidth = 0;
         g_app.glassHeight = 0;
         g_app.glassAvailable = false;
-        if (g_app.compositionMode && g_app.rt && g_app.translucent && !g_app.glassAvailable) {
-            EnableSystemBackdrop(g_app.hwnd);
+        if (g_app.compositionMode && g_app.rt) {
+            if (g_app.glassMode == GlassMode::Dynamic) {
+                EnableDynamicBackdrop(g_app.hwnd);
+            } else {
+                EnableStaticBackdropFallback(g_app.hwnd);
+            }
         }
         UpdatePalette();
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
@@ -2206,7 +2431,11 @@ void RefreshMainBackdrop() {
 }
 
 void RefreshMainBackdropForDrag(HWND hwnd) {
-    if (!hwnd || !g_app.translucent) return;
+    if (!hwnd || !GlassEnabled()) return;
+    if (g_app.glassMode == GlassMode::Dynamic && g_app.compositionMode &&
+        g_app.dynamicBackdrop) {
+        return;
+    }
 
     // Hide the window from one composition so the capture contains the current
     // desktop behind it rather than a snapshot of our own glass surface.
@@ -2237,9 +2466,12 @@ void RefreshTheme() {
     g_app.dark = g_app.systemDark;
     UpdatePalette();
     ApplyWindowTheme(g_app.hwnd, g_app.dark);
-    if (g_app.compositionMode && g_app.rt && g_app.hwnd && g_app.translucent &&
-        !g_app.glassAvailable) {
-        EnableSystemBackdrop(g_app.hwnd);
+    if (g_app.compositionMode && g_app.rt && g_app.hwnd) {
+        if (g_app.glassMode == GlassMode::Dynamic && !g_app.dynamicBackdrop) {
+            EnableDynamicBackdrop(g_app.hwnd);
+        } else if (GlassEnabled() && !g_app.glassAvailable) {
+            EnableStaticBackdropFallback(g_app.hwnd);
+        }
     }
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
@@ -2252,9 +2484,12 @@ void SetThemeMode(ThemeMode mode) {
     UpdatePalette();
     SaveThemeMode(mode);
     ApplyWindowTheme(g_app.hwnd, dark);
-    if (g_app.compositionMode && g_app.rt && g_app.hwnd && g_app.translucent &&
-        !g_app.glassAvailable) {
-        EnableSystemBackdrop(g_app.hwnd);
+    if (g_app.compositionMode && g_app.rt && g_app.hwnd) {
+        if (g_app.glassMode == GlassMode::Dynamic && !g_app.dynamicBackdrop) {
+            EnableDynamicBackdrop(g_app.hwnd);
+        } else if (GlassEnabled() && !g_app.glassAvailable) {
+            EnableStaticBackdropFallback(g_app.hwnd);
+        }
     }
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
@@ -2274,6 +2509,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         }
         LocalFree(arguments);
     }
+
+    const std::wstring pendingVersion = LoadPendingUpdateVersion();
+    const bool updateCompleted =
+        !pendingVersion.empty() && IsValidVersion(pendingVersion) &&
+        CompareVersions(EASYQR_VERSION_STRING, pendingVersion) >= 0;
+    if (updateCompleted) updatedLaunch = true;
 
     std::vector<wchar_t> executablePath(MAX_PATH);
     for (;;) {
@@ -2309,6 +2550,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         HWND existing = FindWindowW(EASYQR_MAIN_CLASS, nullptr);
         if (existing && !launchedHidden) PostMessageW(existing, kShowMainMessage, 0, 0);
         return 0;
+    }
+
+    if (!pendingVersion.empty()) {
+        ClearPendingUpdateVersion();
+        if (updateCompleted) {
+            g_app.updateState = UpdateState::UpToDate;
+            g_app.updateMessage = L"已更新到 v" + pendingVersion;
+        } else if (IsValidVersion(pendingVersion)) {
+            g_app.updateState = UpdateState::Error;
+            g_app.updateMessage = L"上次更新未完成，请重新检查更新";
+        }
     }
 
     if (!executablePath.empty()) {
@@ -2356,7 +2608,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     g_app.systemDark = IsDarkThemePreferred();
     g_app.themeMode = LoadThemeMode();
     g_app.closeToTray = LoadCloseToTray();
-    g_app.translucent = LoadTranslucency();
+    g_app.glassMode = LoadGlassMode();
     g_app.autoStart = IsAutoStartEnabled();
     g_app.fullscreenHotkey = LoadHotkey(true);
     g_app.regionHotkey = LoadHotkey(false);

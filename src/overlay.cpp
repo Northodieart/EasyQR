@@ -170,7 +170,7 @@ void FillRounded(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_
 
 void DrawAcrylicPanel(ID2D1RenderTarget* rt, const OverlayState& state, const D2D1_RECT_F& rect,
                       float radius, const D2D1_COLOR_F& tint) {
-    if (!g_app.translucent || !state.blurBrush) {
+    if (!GlassEnabled() || !state.blurBrush) {
         D2D1_COLOR_F solid = tint;
         solid.a = 1.0f;
         FillRounded(rt, state.brush.Get(), rect, radius, solid);
@@ -1315,7 +1315,7 @@ void StartScan(ScanMode mode) {
 
     state.uiScale = std::max(1.0f, static_cast<float>(DpiOfWindow(g_app.hwnd)) / 96.0f);
     state.primaryPx = PrimaryMonitorRectRelativeTo(state.frame);
-    if (g_app.translucent) {
+    if (GlassEnabled()) {
         std::vector<uint32_t> glassPixels;
         int glassWidth = 0;
         int glassHeight = 0;

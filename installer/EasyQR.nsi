@@ -20,7 +20,7 @@ OutFile "${OUTPUT}"
 !endif
 
 !define APP_NAME "EasyQR"
-!define APP_VERSION "1.4.4"
+!define APP_VERSION "1.4.5"
 !define PUBLISHER "Northodieart"
 !define MAIN_CLASS "EasyQR.MainWindow"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\EasyQR"
@@ -28,7 +28,7 @@ OutFile "${OUTPUT}"
 
 Var UpdateMode
 
-VIProductVersion "1.4.4.0"
+VIProductVersion "1.4.5.0"
 VIAddVersionKey "ProductName" "EasyQR"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey "FileDescription" "EasyQR 屏幕二维码识别安装程序"
@@ -93,14 +93,17 @@ Function .onInit
     ${EndIf}
 
     ${If} $UpdateMode == "1"
-        StrCpy $R1 0
-        update_close_loop:
-            FindWindow $0 "${MAIN_CLASS}" ""
-            StrCmp $0 0 install_init_done
-            SendMessage $0 0x8016 0 0
-            Sleep 300
-            IntOp $R1 $R1 + 1
-            IntCmp $R1 15 install_init_abort update_close_loop install_init_abort
+        FindWindow $0 "${MAIN_CLASS}" ""
+        StrCmp $0 0 install_init_done
+        System::Call 'user32::GetWindowThreadProcessId(p r0, *i .r1)'
+        SendMessage $0 0x8016 0 0
+        System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i r1) i .r2'
+        ${If} $2 != 0
+            System::Call 'kernel32::WaitForSingleObject(p r2, i 15000) i .r3'
+            System::Call 'kernel32::CloseHandle(p r2) i .r4'
+        ${Else}
+            Sleep 800
+        ${EndIf}
     ${Else}
         FindWindow $0 "${MAIN_CLASS}" ""
         StrCmp $0 0 install_init_done
@@ -113,6 +116,8 @@ Function .onInit
         MessageBox MB_ICONSTOP "无法关闭正在运行的 EasyQR，请退出后重试。" /SD IDOK
     ${EndIf}
 
+    Goto install_init_done
+
 install_init_abort:
     Abort
 install_init_done:
@@ -120,7 +125,7 @@ FunctionEnd
 
 Function .onInstSuccess
     ${If} $UpdateMode == "1"
-        Exec '"$INSTDIR\EasyQR.exe"'
+        Exec '"$WINDIR\explorer.exe" "$INSTDIR\EasyQR.exe"'
     ${EndIf}
 FunctionEnd
 

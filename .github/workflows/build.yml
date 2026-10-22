@@ -40,11 +40,11 @@ jobs:
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: EasyQR-1.4.4-x64
+          name: EasyQR-1.4.5-x64
           path: |
             dist/EasyQR.exe
-            dist/EasyQR-1.4.4-x64-portable.zip
-            dist/EasyQR-1.4.4-x64-setup.exe
+            dist/EasyQR-1.4.5-x64-portable.zip
+            dist/EasyQR-1.4.5-x64-setup.exe
             dist/SHA256SUMS.txt
 
   release:
@@ -57,7 +57,7 @@ jobs:
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
-          name: EasyQR-1.4.4-x64
+          name: EasyQR-1.4.5-x64
           path: release
 
       - name: Publish GitHub Release

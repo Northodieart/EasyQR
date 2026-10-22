@@ -4,6 +4,8 @@
 
 enum class ThemeMode { System = 0, Light = 1, Dark = 2 };
 
+enum class GlassMode { None = 0, Static = 1, Dynamic = 2 };
+
 struct HotkeyBinding {
     UINT mods = 0;
     UINT vk = 0;
@@ -25,8 +27,11 @@ ThemeMode LoadThemeMode();
 void SaveThemeMode(ThemeMode mode);
 bool LoadCloseToTray();
 void SaveCloseToTray(bool enabled);
-bool LoadTranslucency();
-void SaveTranslucency(bool enabled);
+GlassMode LoadGlassMode();
+void SaveGlassMode(GlassMode mode);
+std::wstring LoadPendingUpdateVersion();
+void SavePendingUpdateVersion(const std::wstring& version);
+void ClearPendingUpdateVersion();
 bool IsAutoStartEnabled();
 bool SetAutoStart(bool enabled);
 HotkeyBinding LoadHotkey(bool fullscreen);

@@ -5,7 +5,7 @@
 
 enum class MainView { Home, Settings };
 
-enum class UpdateState { Idle, Checking, Available, Downloading, UpToDate, Error };
+enum class UpdateState { Idle, Checking, Available, Downloading, Launching, UpToDate, Error };
 
 struct AppState {
     enum class StatusKind { None, Info, Error };
@@ -15,7 +15,7 @@ struct AppState {
     bool systemDark = false;
     bool dark = false;
     ThemeMode themeMode = ThemeMode::System;
-    bool translucent = true;
+    GlassMode glassMode = GlassMode::Static;
     MainView view = MainView::Home;
 
     bool closeToTray = false;
@@ -72,6 +72,7 @@ struct AppState {
     ComPtr<IDCompositionVisual> compositionVisual;
     bool compositionMode = false;
     bool backdropEnabled = false;
+    bool dynamicBackdrop = false;
 
     UINT dpi = 96;
     int hoverControl = -1;
@@ -84,6 +85,8 @@ struct AppState {
 };
 
 extern AppState g_app;
+
+inline bool GlassEnabled() { return g_app.glassMode != GlassMode::None; }
 
 void RefreshTheme();
 void SetThemeMode(ThemeMode mode);
