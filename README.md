@@ -132,8 +132,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.4.12-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.4.12-x64-setup.exe` | 安装版 |
+| `EasyQR-1.4.13-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.4.13-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -175,8 +175,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.4.12
-git push origin v1.4.12
+git tag v1.4.13
+git push origin v1.4.13
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -221,6 +221,13 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.4.13
+
+- 新增一个默认关闭的**系统材质探针**，用来在真机上确认 Windows 11 24H2 的逐像素透明路线能拿到什么效果。`DWMWA_REDIRECTIONBITMAP_ALPHA`（属性 39，Build 26100 起）让 DWM 尊重普通窗口表面的 alpha——在此之前官方文档明确写着该表面「按完全不透明处理」，这正是 1.4.7 未绘制区域显示为黑色的原因。表面一旦带上 alpha，DWM 画在表面**后面**的系统材质就有机会透出来，而材质是合成期采样的，结构上不可能滞后。
+- 探针用命令行开启：`EasyQR.exe --probe=N`（N 取 1–7），运行中按 `F1`–`F7` 直接换档、`F12` 回到正式版渲染路径，不需要重启。设置页「模糊」下方会显示当前档位、系统构建号，以及 `alpha` / `材质` / `边框扩展` 三个 DWM 调用是否被接受。
+- 七个档位分别是：1 = 只有 alpha（终端式纯透明 + 我们自己的色调，无模糊）；2 = alpha + 系统 Acrylic + `DwmExtendFrameIntoClientArea`；3 = alpha + 系统 Acrylic（不扩展边框）；4 = alpha + 系统 Mica + 扩展边框；5 = alpha + 把程序侧采样模糊画成半透明（比现在更通透，但仍是采样）；6 = 只透出系统 Acrylic，完全不叠我们自己的色调（用来判断材质本身到底画没画）；7 = alpha + `DWMSBT_TABBEDWINDOW` 材质 + 扩展边框。
+- 探针只在渲染目标上启用预乘 Alpha；属性 39 不被接受时（24H2 之前）自动按原来的不透明路径绘制，诊断行会显示 `alpha=失败`，行为与 1.4.12 完全一致。
 
 ### 1.4.12
 
