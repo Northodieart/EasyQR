@@ -15,3 +15,7 @@ struct ScreenFrame {
 
 // Captures the whole virtual desktop into memory. Never writes a file.
 bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray = true);
+
+// Captures a screen rectangle (virtual-desktop coordinates) as BGRA only.
+// Used by the live glass, which samples just the area behind the window.
+bool CaptureScreenRect(const RECT& bounds, ScreenFrame* frame, std::wstring* error);

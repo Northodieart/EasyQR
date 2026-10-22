@@ -21,14 +21,14 @@ std::wstring LastErrorText(const wchar_t* prefix) {
 
 }  // namespace
 
-bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray) {
+static bool CaptureBounds(const RECT& bounds, ScreenFrame* frame, std::wstring* error, bool includeGray) {
     if (!frame) return false;
 
     ScreenFrame result;
-    result.x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    result.y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    result.width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    result.height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    result.x = bounds.left;
+    result.y = bounds.top;
+    result.width = bounds.right - bounds.left;
+    result.height = bounds.bottom - bounds.top;
 
     if (result.width <= 0 || result.height <= 0) {
         if (error) *error = L"无法获取屏幕尺寸。";
@@ -122,4 +122,17 @@ bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray) {
 
     *frame = std::move(result);
     return true;
+}
+
+bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray) {
+    const LONG x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const LONG y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const LONG width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const LONG height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    const RECT bounds{x, y, x + width, y + height};
+    return CaptureBounds(bounds, frame, error, includeGray);
+}
+
+bool CaptureScreenRect(const RECT& bounds, ScreenFrame* frame, std::wstring* error) {
+    return CaptureBounds(bounds, frame, error, false);
 }

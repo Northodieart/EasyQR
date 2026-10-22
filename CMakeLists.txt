@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(EasyQR VERSION 1.4.7 LANGUAGES C CXX)
+project(EasyQR VERSION 1.4.8 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "EasyQR targets Windows x64. Configure with -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw64.cmake")

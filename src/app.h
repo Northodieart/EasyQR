@@ -72,8 +72,7 @@ struct AppState {
     ID2D1HwndRenderTarget* hwndTarget = nullptr;
     ComPtr<ID2D1SolidColorBrush> brush;
     ComPtr<ID2D1Bitmap> glassBitmap;
-    bool backdropEnabled = false;
-    bool dynamicBackdrop = false;
+    bool liveSampling = false;
     bool dragCapturePending = false;
 
     UINT dpi = 96;
