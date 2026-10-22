@@ -175,6 +175,13 @@ bool LoadCloseToTray() {
 
 void SaveCloseToTray(bool enabled) { WriteDword(L"CloseToTray", enabled ? 1u : 0u); }
 
+bool LoadTranslucency() {
+    DWORD value = 1;
+    return !ReadDword(L"Translucency", &value) || value != 0;
+}
+
+void SaveTranslucency(bool enabled) { WriteDword(L"Translucency", enabled ? 1u : 0u); }
+
 bool IsAutoStartEnabled() {
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunRegistryPath, 0, KEY_QUERY_VALUE, &key) !=

@@ -17,7 +17,7 @@ namespace {
 
 constexpr float kClientWidth = 400.0f;
 constexpr float kHomeClientHeight = 240.0f;
-constexpr float kSettingsClientHeight = 520.0f;
+constexpr float kSettingsClientHeight = 560.0f;
 constexpr float kTitleBarHeight = 44.0f;
 
 constexpr UINT kTrayCallbackMessage = WM_APP + 20;
@@ -27,6 +27,8 @@ constexpr UINT kUpdateCheckDoneMessage = WM_APP + 30;
 constexpr UINT kUpdateReadyMessage = WM_APP + 31;
 constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
+constexpr UINT_PTR kViewAnimationTimer = 2;
+constexpr UINT kViewAnimationDurationMs = 200;
 
 enum TrayCommand : UINT {
     kTrayOpen = 1,
@@ -54,6 +56,7 @@ enum ControlId : int {
     kHotkeyFullscreenControl = 16,
     kHotkeyRegionControl = 17,
     kUpdateButton = 18,
+    kTranslucencyControl = 19,
 };
 
 const D2D1_RECT_F kTileRects[2] = {
@@ -71,13 +74,15 @@ const D2D1_RECT_F kThemeRects[3] = {
     D2D1::RectF(144.0f, 82.0f, 256.0f, 116.0f),
     D2D1::RectF(264.0f, 82.0f, 376.0f, 116.0f),
 };
-const D2D1_RECT_F kCloseToTrayRow = D2D1::RectF(24.0f, 156.0f, 376.0f, 190.0f);
-const D2D1_RECT_F kCloseToTraySwitch = D2D1::RectF(328.0f, 160.0f, 376.0f, 186.0f);
-const D2D1_RECT_F kAutoStartRow = D2D1::RectF(24.0f, 194.0f, 376.0f, 228.0f);
-const D2D1_RECT_F kAutoStartSwitch = D2D1::RectF(328.0f, 198.0f, 376.0f, 224.0f);
-const D2D1_RECT_F kHotkeyFullscreenButton = D2D1::RectF(196.0f, 270.0f, 376.0f, 304.0f);
-const D2D1_RECT_F kHotkeyRegionButton = D2D1::RectF(196.0f, 308.0f, 376.0f, 342.0f);
-const D2D1_RECT_F kUpdateButtonRect = D2D1::RectF(236.0f, 404.0f, 376.0f, 436.0f);
+const D2D1_RECT_F kTranslucencyRow = D2D1::RectF(24.0f, 124.0f, 376.0f, 158.0f);
+const D2D1_RECT_F kTranslucencySwitch = D2D1::RectF(328.0f, 128.0f, 376.0f, 154.0f);
+const D2D1_RECT_F kCloseToTrayRow = D2D1::RectF(24.0f, 196.0f, 376.0f, 230.0f);
+const D2D1_RECT_F kCloseToTraySwitch = D2D1::RectF(328.0f, 200.0f, 376.0f, 226.0f);
+const D2D1_RECT_F kAutoStartRow = D2D1::RectF(24.0f, 234.0f, 376.0f, 268.0f);
+const D2D1_RECT_F kAutoStartSwitch = D2D1::RectF(328.0f, 238.0f, 376.0f, 264.0f);
+const D2D1_RECT_F kHotkeyFullscreenButton = D2D1::RectF(196.0f, 314.0f, 376.0f, 348.0f);
+const D2D1_RECT_F kHotkeyRegionButton = D2D1::RectF(196.0f, 352.0f, 376.0f, 386.0f);
+const D2D1_RECT_F kUpdateButtonRect = D2D1::RectF(236.0f, 448.0f, 376.0f, 480.0f);
 
 float ClientHeightForView() {
     return g_app.view == MainView::Settings ? kSettingsClientHeight : kHomeClientHeight;
@@ -198,7 +203,7 @@ struct WindowCompositionAttributeData {
 using SetWindowCompositionAttributeFn =
     BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
 
-bool ApplyAccentAcrylic(HWND hwnd) {
+SetWindowCompositionAttributeFn AccentAttributeSetter() {
     static const SetWindowCompositionAttributeFn setAttribute = [] {
         HMODULE user32 = GetModuleHandleW(L"user32.dll");
         FARPROC procedure = user32 ? GetProcAddress(user32, "SetWindowCompositionAttribute")
@@ -207,15 +212,32 @@ bool ApplyAccentAcrylic(HWND hwnd) {
         if (procedure) std::memcpy(&function, &procedure, sizeof(function));
         return function;
     }();
-    if (!setAttribute) return false;
+    return setAttribute;
+}
 
+bool SetAccentPolicy(HWND hwnd, int state, DWORD gradientColor) {
+    SetWindowCompositionAttributeFn setAttribute = AccentAttributeSetter();
+    if (!setAttribute) return false;
     AccentPolicy policy{};
-    policy.accentState = 4;  // ACCENT_ENABLE_ACRYLICBLURBEHIND
-    policy.accentFlags = 2;
-    policy.gradientColor = g_app.dark ? 0x66000000u : 0x66F3F3F3u;
+    policy.accentState = state;
+    policy.accentFlags = state == 0 ? 0 : 2;
+    policy.gradientColor = gradientColor;
     WindowCompositionAttributeData data{WindowCompositionAttribute::AccentPolicy, &policy,
                                         sizeof(policy)};
     return setAttribute(hwnd, &data) != FALSE;
+}
+
+bool ApplyAccentAcrylic(HWND hwnd) {
+    return SetAccentPolicy(hwnd, 4,  // ACCENT_ENABLE_ACRYLICBLURBEHIND
+                           g_app.dark ? 0x66000000u : 0x66F3F3F3u);
+}
+
+void DisableSystemBackdrop(HWND hwnd) {
+    if (!hwnd) return;
+    SetAccentPolicy(hwnd, 0, 0);
+    int backdrop = 1;  // DWMSBT_NONE
+    DwmSetWindowAttribute(hwnd, 38, &backdrop, sizeof(backdrop));
+    g_app.backdropEnabled = false;
 }
 
 void EnableSystemBackdrop(HWND hwnd) {
@@ -348,7 +370,7 @@ bool InitializeCompositionRenderer(HWND hwnd, UINT width, UINT height) {
 
     g_app.compositionMode = true;
     CreateGlassBitmap();
-    if (!g_app.glassAvailable) EnableSystemBackdrop(hwnd);
+    if (g_app.translucent && !g_app.glassAvailable) EnableSystemBackdrop(hwnd);
     UpdatePalette();
     return true;
 }
@@ -430,7 +452,7 @@ void DiscardRenderTarget() {
 
 void UpdatePalette() {
     g_app.palette = MakePalette(g_app.dark);
-    if (!g_app.backdropEnabled && !g_app.glassAvailable) return;
+    if (!g_app.translucent || (!g_app.backdropEnabled && !g_app.glassAvailable)) return;
     g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.42f : 0.62f);
     g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.72f : 0.80f);
     g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, g_app.dark ? 0.82f : 0.88f);
@@ -445,7 +467,7 @@ void UpdatePalette() {
 
 bool CreateGlassBitmap() {
     g_app.glassBitmap.Reset();
-    if (!g_app.rt || g_app.glassWidth <= 0 || g_app.glassHeight <= 0 ||
+    if (!g_app.translucent || !g_app.rt || g_app.glassWidth <= 0 || g_app.glassHeight <= 0 ||
         g_app.glassPixels.empty()) {
         g_app.glassAvailable = false;
         UpdatePalette();
@@ -510,6 +532,7 @@ bool UsesHandCursor(int control) {
 void CancelHotkeyCapture(bool restoreHotkeys);
 void BeginHotkeyCapture(bool fullscreen);
 void SetCloseToTrayEnabled(bool enabled);
+void SetTranslucencyEnabled(bool enabled);
 void ToggleAutoStart();
 void ShowMainFromTray(HWND hwnd);
 void HideToTray(HWND hwnd);
@@ -549,6 +572,68 @@ void ResizeWindowForView(HWND hwnd) {
     SetWindowPos(hwnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+void StopViewAnimation(HWND hwnd) {
+    if (!g_app.viewAnimationActive) return;
+    g_app.viewAnimationActive = false;
+    if (hwnd) KillTimer(hwnd, kViewAnimationTimer);
+}
+
+void CompleteViewAnimation(HWND hwnd) {
+    if (!g_app.viewAnimationActive) return;
+    StopViewAnimation(hwnd);
+    ResizeWindowForView(hwnd);
+}
+
+void StartViewAnimation(HWND hwnd) {
+    if (!hwnd) return;
+    StopViewAnimation(hwnd);
+
+    const UINT dpi = DpiOfWindow(hwnd);
+    const int width = MulDiv(static_cast<int>(kClientWidth), dpi, 96);
+    const int targetHeight = MulDiv(static_cast<int>(ClientHeightForView()), dpi, 96);
+    RECT current{};
+    GetWindowRect(hwnd, &current);
+    const int startHeight = current.bottom - current.top;
+
+    if (startHeight == targetHeight) {
+        ResizeWindowForView(hwnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+
+    RECT work{};
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        work = monitor.rcWork;
+    } else {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    }
+    int x = current.left;
+    int y = current.top;
+    if (x + width > work.right) x = work.right - width;
+    if (x < work.left) x = work.left;
+    if (y + targetHeight > work.bottom) y = work.bottom - targetHeight;
+    if (y < work.top) y = work.top;
+
+    EnsureRenderTarget(hwnd);
+    if (g_app.compositionMode && g_app.rt) {
+        ResizeRenderTarget(static_cast<UINT>(width),
+                           static_cast<UINT>(std::max(startHeight, targetHeight)));
+    }
+
+    g_app.viewAnimationActive = true;
+    g_app.viewAnimationStart = GetTickCount64();
+    g_app.viewAnimationStartHeight = startHeight;
+    g_app.viewAnimationTargetHeight = targetHeight;
+    SetWindowPos(hwnd, nullptr, x, y, width, startHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    if (SetTimer(hwnd, kViewAnimationTimer, 10, nullptr) == 0) {
+        StopViewAnimation(hwnd);
+        ResizeWindowForView(hwnd);
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 int ControlAt(float x, float y) {
     if (PointInRect(kTitleSettingsRect, x, y)) return kSettings;
     if (PointInRect(kMinimizeRect, x, y)) return kMinimize;
@@ -565,6 +650,7 @@ int ControlAt(float x, float y) {
     for (int i = 0; i < 3; ++i) {
         if (PointInRect(kThemeRects[i], x, y)) return kThemeSystem + i;
     }
+    if (PointInRect(kTranslucencyRow, x, y)) return kTranslucencyControl;
     if (PointInRect(kCloseToTrayRow, x, y)) return kCloseToTrayControl;
     if (PointInRect(kAutoStartRow, x, y)) return kAutoStartControl;
     if (PointInRect(kHotkeyFullscreenButton, x, y)) return kHotkeyFullscreenControl;
@@ -575,8 +661,9 @@ int ControlAt(float x, float y) {
 
 std::vector<int> FocusOrder() {
     if (g_app.view == MainView::Home) return {kFullScreen, kRegion, kSettings};
-    return {kBack, kThemeSystem, kThemeLight, kThemeDark, kCloseToTrayControl,
-            kAutoStartControl, kHotkeyFullscreenControl, kHotkeyRegionControl, kUpdateButton};
+    return {kBack, kThemeSystem, kThemeLight, kThemeDark, kTranslucencyControl,
+            kCloseToTrayControl, kAutoStartControl, kHotkeyFullscreenControl,
+            kHotkeyRegionControl, kUpdateButton};
 }
 
 void ResetInteraction() {
@@ -592,7 +679,7 @@ void SwitchView(MainView view) {
     g_app.view = view;
     ResetInteraction();
     if (g_app.hwnd) {
-        ResizeWindowForView(g_app.hwnd);
+        StartViewAnimation(g_app.hwnd);
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
     }
 }
@@ -992,14 +1079,16 @@ void DrawSettings(ID2D1RenderTarget* rt) {
                D2D1::RectF(24.0f, 64.0f, 200.0f, 80.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
     for (int i = 0; i < 3; ++i) DrawThemeButton(rt, i);
+    DrawToggleRow(rt, kTranslucencyRow, kTranslucencySwitch, L"半透明玻璃效果",
+                  kTranslucencyControl, g_app.translucent);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 128.0f), D2D1::Point2F(kClientWidth - 24.0f, 128.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 170.0f), D2D1::Point2F(kClientWidth - 24.0f, 170.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"常规", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 138.0f, 200.0f, 156.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 180.0f, 200.0f, 198.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
     DrawToggleRow(rt, kCloseToTrayRow, kCloseToTraySwitch, L"关闭窗口时最小化到托盘",
                   kCloseToTrayControl, g_app.closeToTray);
@@ -1007,12 +1096,12 @@ void DrawSettings(ID2D1RenderTarget* rt) {
                   kAutoStartControl, g_app.autoStart);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 240.0f), D2D1::Point2F(kClientWidth - 24.0f, 240.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 280.0f), D2D1::Point2F(kClientWidth - 24.0f, 280.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"快捷键", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 250.0f, 200.0f, 268.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 290.0f, 200.0f, 308.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
@@ -1046,21 +1135,21 @@ void DrawSettings(ID2D1RenderTarget* rt) {
     }
     SetBrushColor(g_app.brush.Get(), noteColor);
     DrawTextEx(rt, g_app.dwrite.Get(), note, g_app.fonts.chipSmall.Get(),
-               D2D1::RectF(24.0f, 346.0f, 376.0f, 364.0f), g_app.brush.Get(),
+               D2D1::RectF(24.0f, 390.0f, 376.0f, 408.0f), g_app.brush.Get(),
                TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 372.0f), D2D1::Point2F(kClientWidth - 24.0f, 372.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 416.0f), D2D1::Point2F(kClientWidth - 24.0f, 416.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"关于与更新", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 382.0f, 200.0f, 400.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 426.0f, 200.0f, 444.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
     DrawTextEx(rt, g_app.dwrite.Get(), L"EasyQR " EASYQR_VERSION_STRING, g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 408.0f, 220.0f, 428.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 452.0f, 220.0f, 472.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
     DrawUpdateButton(rt);
@@ -1076,18 +1165,18 @@ void DrawSettings(ID2D1RenderTarget* rt) {
     }
     SetBrushColor(g_app.brush.Get(), updateColor);
     DrawTextEx(rt, g_app.dwrite.Get(), updateText, g_app.fonts.chipSmall.Get(),
-               D2D1::RectF(24.0f, 440.0f, 376.0f, 458.0f), g_app.brush.Get(),
+               D2D1::RectF(24.0f, 484.0f, 376.0f, 502.0f), g_app.brush.Get(),
                TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"图像与扫描结果仅在本机内存中处理，不作保存。",
-               g_app.fonts.footer.Get(), D2D1::RectF(24.0f, 466.0f, 376.0f, 482.0f),
+               g_app.fonts.footer.Get(), D2D1::RectF(24.0f, 510.0f, 376.0f, 526.0f),
                g_app.brush.Get(), TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.tertiary);
     DrawTextEx(rt, g_app.dwrite.Get(),
                L"MIT License · ZXing-C++ + quirc · 设置卸载时删除",
-               g_app.fonts.chipSmall.Get(), D2D1::RectF(24.0f, 484.0f, 376.0f, 500.0f),
+               g_app.fonts.chipSmall.Get(), D2D1::RectF(24.0f, 528.0f, 376.0f, 544.0f),
                g_app.brush.Get(), TextAlign::Leading, true, true);
 }
 
@@ -1117,10 +1206,10 @@ void PaintMainWindow(HWND hwnd) {
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    if (g_app.glassBitmap) {
+    if (g_app.translucent && g_app.glassBitmap) {
         rt->Clear(g_app.palette.page);
         DrawGlassBackground(rt, hwnd);
-    } else if (g_app.backdropEnabled) {
+    } else if (g_app.translucent && g_app.backdropEnabled) {
         rt->Clear(D2D1::ColorF(0, 0.0f));
         SetBrushColor(g_app.brush.Get(), g_app.palette.page);
         RECT client{};
@@ -1142,7 +1231,7 @@ void PaintMainWindow(HWND hwnd) {
 
     const HRESULT hr = rt->EndDraw();
     if (SUCCEEDED(hr) && g_app.compositionMode && g_app.swapChain) {
-        g_app.swapChain->Present(1, 0);
+        g_app.swapChain->Present(0, 0);
     }
     EndPaint(hwnd, &ps);
 
@@ -1182,7 +1271,10 @@ void ActivateControl(int control) {
         return;
     }
     if (control == kMinimize) {
-        if (g_app.hwnd) ShowWindow(g_app.hwnd, SW_MINIMIZE);
+        if (g_app.hwnd) {
+            CompleteViewAnimation(g_app.hwnd);
+            ShowWindow(g_app.hwnd, SW_MINIMIZE);
+        }
         return;
     }
     if (control == kClose) {
@@ -1208,6 +1300,10 @@ void ActivateControl(int control) {
     }
     if (control == kAutoStartControl) {
         ToggleAutoStart();
+        return;
+    }
+    if (control == kTranslucencyControl) {
+        SetTranslucencyEnabled(!g_app.translucent);
         return;
     }
     if (control == kHotkeyFullscreenControl) {
@@ -1239,11 +1335,14 @@ bool EnsureTrayIcon(HWND hwnd) {
     g_trayData.uID = 1;
     g_trayData.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_trayData.uCallbackMessage = kTrayCallbackMessage;
+    const UINT trayDpi = GetDpiForSystem();
+    const int trayIconWidth = GetSystemMetricsForDpi(SM_CXSMICON, trayDpi);
+    const int trayIconHeight = GetSystemMetricsForDpi(SM_CYSMICON, trayDpi);
     g_trayData.hIcon = static_cast<HICON>(LoadImageW(
-        g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
-        GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+        g_app.instance, MAKEINTRESOURCEW(IDI_TRAY), IMAGE_ICON, trayIconWidth, trayIconHeight,
+        LR_SHARED));
     if (!g_trayData.hIcon) {
-        g_trayData.hIcon = LoadIconW(g_app.instance, MAKEINTRESOURCEW(IDI_APP));
+        g_trayData.hIcon = LoadIconW(g_app.instance, MAKEINTRESOURCEW(IDI_TRAY));
     }
     CopyTrayText(g_trayData.szTip, L"EasyQR");
 
@@ -1284,12 +1383,17 @@ void UpdateTrayPresence(HWND hwnd) {
 
 void ApplyWindowIcons(HWND hwnd) {
     if (!hwnd) return;
+    const UINT dpi = DpiOfWindow(hwnd);
+    const int largeWidth = GetSystemMetricsForDpi(SM_CXICON, dpi);
+    const int largeHeight = GetSystemMetricsForDpi(SM_CYICON, dpi);
+    const int smallWidth = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+    const int smallHeight = GetSystemMetricsForDpi(SM_CYSMICON, dpi);
     const HICON large = static_cast<HICON>(
-        LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
-                   GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED));
+        LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, largeWidth,
+                   largeHeight, LR_SHARED));
     const HICON small = static_cast<HICON>(
-        LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
-                   GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+        LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, smallWidth,
+                   smallHeight, LR_SHARED));
     if (large) {
         SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large));
         SetClassLongPtrW(hwnd, GCLP_HICON, reinterpret_cast<LONG_PTR>(large));
@@ -1315,6 +1419,7 @@ void ShowMainFromTray(HWND hwnd) {
 
 void HideToTray(HWND hwnd) {
     CancelHotkeyCapture(true);
+    CompleteViewAnimation(hwnd);
     if (!EnsureTrayIcon(hwnd)) {
         MessageBoxW(hwnd, L"无法创建托盘图标，EasyQR 将保持主窗口打开。", L"EasyQR",
                     MB_ICONERROR | MB_OK);
@@ -1501,6 +1606,44 @@ void ToggleAutoStart() {
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
+void SetTranslucencyEnabled(bool enabled) {
+    if (g_app.translucent == enabled) return;
+    if (g_app.viewAnimationActive) CompleteViewAnimation(g_app.hwnd);
+    g_app.translucent = enabled;
+    SaveTranslucency(enabled);
+
+    if (!enabled) {
+        g_app.glassBitmap.Reset();
+        g_app.glassAvailable = false;
+        if (g_app.compositionMode) DisableSystemBackdrop(g_app.hwnd);
+        UpdatePalette();
+        if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
+        return;
+    }
+
+    if (!g_app.glassPixels.empty()) {
+        if (g_app.rt) {
+            CreateGlassBitmap();
+        } else {
+            g_app.glassAvailable = true;
+            UpdatePalette();
+        }
+        if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
+        return;
+    }
+
+    if (!g_app.hwnd) return;
+    HWND hwnd = g_app.hwnd;
+    ShowWindow(hwnd, SW_HIDE);
+    DwmFlush();
+    Sleep(40);
+    RefreshMainBackdrop();
+    ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
+    SetFocus(hwnd);
+    UpdateWindow(hwnd);
+}
+
 void JoinUpdateThread() {
     if (g_app.updateThread.joinable()) g_app.updateThread.join();
 }
@@ -1677,7 +1820,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             }
             return 0;
         case kTrayCallbackMessage:
-            if (lParam == WM_LBUTTONDBLCLK) {
+            if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
                 ShowMainFromTray(hwnd);
             } else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
                 ShowTrayMenu(hwnd);
@@ -1710,10 +1853,57 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         case WM_PAINT:
             PaintMainWindow(hwnd);
             return 0;
+        case WM_TIMER:
+            if (wParam == kViewAnimationTimer && g_app.viewAnimationActive) {
+                const double elapsed =
+                    static_cast<double>(GetTickCount64() - g_app.viewAnimationStart);
+                const double progress =
+                    std::min(1.0, elapsed / static_cast<double>(kViewAnimationDurationMs));
+                const double eased = 1.0 - std::pow(1.0 - progress, 3.0);
+                RECT current{};
+                GetWindowRect(hwnd, &current);
+                const int height =
+                    g_app.viewAnimationStartHeight +
+                    static_cast<int>(std::lround(
+                        (g_app.viewAnimationTargetHeight - g_app.viewAnimationStartHeight) *
+                        eased));
+                SetWindowPos(hwnd, nullptr, 0, 0, current.right - current.left, height,
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                UpdateWindow(hwnd);
+                if (progress >= 1.0) {
+                    g_app.viewAnimationActive = false;
+                    KillTimer(hwnd, kViewAnimationTimer);
+                }
+                return 0;
+            }
+            break;
         case WM_SIZE: {
             if (wParam == SIZE_MINIMIZED) {
+                StopViewAnimation(hwnd);
                 DiscardRenderTarget();
                 return 0;
+            }
+            if (g_app.viewAnimationActive) {
+                if (!g_app.compositionMode && g_app.rt) {
+                    RECT client{};
+                    GetClientRect(hwnd, &client);
+                    ResizeRenderTarget(
+                        static_cast<UINT>(std::max<LONG>(1, client.right - client.left)),
+                        static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top)));
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (wParam == SIZE_RESTORED) {
+                RECT windowRect{};
+                GetWindowRect(hwnd, &windowRect);
+                const int targetHeight =
+                    MulDiv(static_cast<int>(ClientHeightForView()), DpiOfWindow(hwnd), 96);
+                if (std::abs((windowRect.bottom - windowRect.top) - targetHeight) > 1) {
+                    ResizeWindowForView(hwnd);
+                    return 0;
+                }
             }
             if (g_app.rt) {
                 RECT client{};
@@ -1766,6 +1956,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
+        case WM_MOVE:
+            if (g_app.translucent && g_app.glassAvailable) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+                UpdateWindow(hwnd);
+            }
+            return 0;
         case WM_NCPAINT:
             return 0;
         case WM_SETTINGCHANGE:
@@ -1924,6 +2120,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             }
             return 0;
         case WM_DESTROY:
+            StopViewAnimation(hwnd);
             g_app.hotkeyCapture = AppState::HotkeyCapture::None;
             UnregisterConfiguredHotkeys();
             RemoveTrayIcon();
@@ -1949,6 +2146,12 @@ void SetStatus(std::wstring text, AppState::StatusKind kind) {
 
 void RefreshMainBackdrop() {
     if (!g_app.hwnd) return;
+    if (!g_app.translucent) {
+        g_app.glassBitmap.Reset();
+        g_app.glassAvailable = false;
+        UpdatePalette();
+        return;
+    }
     if (IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd)) return;
 
     ScreenFrame frame;
@@ -1965,7 +2168,9 @@ void RefreshMainBackdrop() {
         g_app.glassWidth = 0;
         g_app.glassHeight = 0;
         g_app.glassAvailable = false;
-        if (g_app.compositionMode && g_app.rt) EnableSystemBackdrop(g_app.hwnd);
+        if (g_app.compositionMode && g_app.rt && g_app.translucent && !g_app.glassAvailable) {
+            EnableSystemBackdrop(g_app.hwnd);
+        }
         UpdatePalette();
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
@@ -2002,7 +2207,8 @@ void RefreshTheme() {
     g_app.dark = g_app.systemDark;
     UpdatePalette();
     ApplyWindowTheme(g_app.hwnd, g_app.dark);
-    if (g_app.compositionMode && g_app.rt && g_app.hwnd) {
+    if (g_app.compositionMode && g_app.rt && g_app.hwnd && g_app.translucent &&
+        !g_app.glassAvailable) {
         EnableSystemBackdrop(g_app.hwnd);
     }
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
@@ -2016,7 +2222,8 @@ void SetThemeMode(ThemeMode mode) {
     UpdatePalette();
     SaveThemeMode(mode);
     ApplyWindowTheme(g_app.hwnd, dark);
-    if (g_app.compositionMode && g_app.rt && g_app.hwnd) {
+    if (g_app.compositionMode && g_app.rt && g_app.hwnd && g_app.translucent &&
+        !g_app.glassAvailable) {
         EnableSystemBackdrop(g_app.hwnd);
     }
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
@@ -2119,6 +2326,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     g_app.systemDark = IsDarkThemePreferred();
     g_app.themeMode = LoadThemeMode();
     g_app.closeToTray = LoadCloseToTray();
+    g_app.translucent = LoadTranslucency();
     g_app.autoStart = IsAutoStartEnabled();
     g_app.fullscreenHotkey = LoadHotkey(true);
     g_app.regionHotkey = LoadHotkey(false);
@@ -2135,12 +2343,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = EASYQR_MAIN_CLASS;
     wc.style = CS_HREDRAW | CS_VREDRAW;
+    const UINT classDpi = GetDpiForSystem();
     wc.hIcon = static_cast<HICON>(LoadImageW(
-        instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
-        GetSystemMetrics(SM_CYICON), LR_SHARED));
+        instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+        GetSystemMetricsForDpi(SM_CXICON, classDpi),
+        GetSystemMetricsForDpi(SM_CYICON, classDpi), LR_SHARED));
     wc.hIconSm = static_cast<HICON>(LoadImageW(
-        instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
-        GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+        instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+        GetSystemMetricsForDpi(SM_CXSMICON, classDpi),
+        GetSystemMetricsForDpi(SM_CYSMICON, classDpi), LR_SHARED));
 
     if (!RegisterClassExW(&wc)) {
         MessageBoxW(nullptr, L"窗口注册失败。", L"EasyQR", MB_ICONERROR | MB_OK);

@@ -25,6 +25,8 @@ ThemeMode LoadThemeMode();
 void SaveThemeMode(ThemeMode mode);
 bool LoadCloseToTray();
 void SaveCloseToTray(bool enabled);
+bool LoadTranslucency();
+void SaveTranslucency(bool enabled);
 bool IsAutoStartEnabled();
 bool SetAutoStart(bool enabled);
 HotkeyBinding LoadHotkey(bool fullscreen);

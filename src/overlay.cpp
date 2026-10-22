@@ -170,11 +170,14 @@ void FillRounded(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_
 
 void DrawAcrylicPanel(ID2D1RenderTarget* rt, const OverlayState& state, const D2D1_RECT_F& rect,
                       float radius, const D2D1_COLOR_F& tint) {
-    if (state.blurBrush) {
-        rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius),
-                                 state.blurBrush.Get());
-        FillRounded(rt, state.brush.Get(), rect, radius, Rgba(0.0f, 0.0f, 0.0f, 0.20f));
+    if (!g_app.translucent || !state.blurBrush) {
+        D2D1_COLOR_F solid = tint;
+        solid.a = 1.0f;
+        FillRounded(rt, state.brush.Get(), rect, radius, solid);
+        return;
     }
+    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), state.blurBrush.Get());
+    FillRounded(rt, state.brush.Get(), rect, radius, Rgba(0.0f, 0.0f, 0.0f, 0.20f));
     FillRounded(rt, state.brush.Get(), rect, radius, tint);
 }
 
@@ -1312,13 +1315,15 @@ void StartScan(ScanMode mode) {
 
     state.uiScale = std::max(1.0f, static_cast<float>(DpiOfWindow(g_app.hwnd)) / 96.0f);
     state.primaryPx = PrimaryMonitorRectRelativeTo(state.frame);
-    std::vector<uint32_t> glassPixels;
-    int glassWidth = 0;
-    int glassHeight = 0;
-    if (BuildGlassImage(state.frame, 16, &glassPixels, &glassWidth, &glassHeight)) {
-        state.blurPixels = std::move(glassPixels);
-        state.blurWidth = glassWidth;
-        state.blurHeight = glassHeight;
+    if (g_app.translucent) {
+        std::vector<uint32_t> glassPixels;
+        int glassWidth = 0;
+        int glassHeight = 0;
+        if (BuildGlassImage(state.frame, 16, &glassPixels, &glassWidth, &glassHeight)) {
+            state.blurPixels = std::move(glassPixels);
+            state.blurWidth = glassWidth;
+            state.blurHeight = glassHeight;
+        }
     }
 
     if (mode == ScanMode::Fullscreen) {

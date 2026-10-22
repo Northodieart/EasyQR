@@ -5,6 +5,7 @@
 #pragma code_page(65001)
 
 IDI_APP ICON "../assets/easyqr.ico"
+IDI_TRAY ICON "../assets/easyqr-tray.ico"
 IDR_MANIFEST RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO

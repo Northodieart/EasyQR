@@ -15,6 +15,7 @@ struct AppState {
     bool systemDark = false;
     bool dark = false;
     ThemeMode themeMode = ThemeMode::System;
+    bool translucent = true;
     MainView view = MainView::Home;
 
     bool closeToTray = false;
@@ -52,6 +53,11 @@ struct AppState {
     int glassScreenWidth = 0;
     int glassScreenHeight = 0;
     bool glassAvailable = false;
+
+    bool viewAnimationActive = false;
+    ULONGLONG viewAnimationStart = 0;
+    int viewAnimationStartHeight = 0;
+    int viewAnimationTargetHeight = 0;
 
     ComPtr<ID2D1RenderTarget> rt;
     ID2D1HwndRenderTarget* hwndTarget = nullptr;
