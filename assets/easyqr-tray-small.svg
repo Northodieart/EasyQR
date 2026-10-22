@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- easyqr-small.svg scaled about the center to fill the tray cell. -->
+  <g transform="translate(8,8) scale(1.107) translate(-8,-8)">
+    <rect x="1" y="1" width="14" height="14" rx="3.5" fill="#0078D4"/>
+    <g fill="none" stroke="#FFFFFF" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 4.0625 7.5 L 4.0625 5.3125 Q 4.0625 4.0625 5.3125 4.0625 L 6.875 4.0625"/>
+      <path d="M 9.125 4.0625 L 10.6875 4.0625 Q 11.9375 4.0625 11.9375 5.3125 L 11.9375 7.5"/>
+      <path d="M 11.9375 8.5 L 11.9375 10.6875 Q 11.9375 11.9375 10.6875 11.9375 L 9.125 11.9375"/>
+      <path d="M 6.875 11.9375 L 5.3125 11.9375 Q 4.0625 11.9375 4.0625 10.6875 L 4.0625 8.5"/>
+      <path d="M 5.78125 8 L 10.21875 8"/>
+    </g>
+  </g>
+</svg>

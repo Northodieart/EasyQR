@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Same geometry as easyqr.svg, scaled about the center so the badge fills
+       the notification-area cell; the glyph proportions are untouched. -->
+  <g transform="translate(512,512) scale(1.125) translate(-512,-512)">
+    <rect x="64" y="64" width="896" height="896" rx="224" fill="#0078D4"/>
+    <g fill="none" stroke="#FFFFFF" stroke-width="70" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 260 480 L 260 340 Q 260 260 340 260 L 440 260"/>
+      <path d="M 584 260 L 684 260 Q 764 260 764 340 L 764 480"/>
+      <path d="M 764 544 L 764 684 Q 764 764 684 764 L 584 764"/>
+      <path d="M 440 764 L 340 764 Q 260 764 260 684 L 260 544"/>
+      <path d="M 370 512 L 654 512"/>
+    </g>
+  </g>
+</svg>
