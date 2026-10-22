@@ -347,15 +347,22 @@ bool DrawGlassBackground(ID2D1RenderTarget* rt, HWND hwnd) {
     ClientToScreen(hwnd, &origin);
     const float xScale = static_cast<float>(g_app.glassWidth) / g_app.glassScreenWidth;
     const float yScale = static_cast<float>(g_app.glassHeight) / g_app.glassScreenHeight;
-    const float sourceLeft = (origin.x - g_app.glassScreenX) * xScale;
-    const float sourceTop = (origin.y - g_app.glassScreenY) * yScale;
-    const float sourceRight = sourceLeft + clientWidth * xScale;
-    const float sourceBottom = sourceTop + clientHeight * yScale;
-    const D2D1_RECT_F source = D2D1::RectF(
-        std::max(0.0f, sourceLeft), std::max(0.0f, sourceTop),
-        std::min(static_cast<float>(g_app.glassWidth), sourceRight),
-        std::min(static_cast<float>(g_app.glassHeight), sourceBottom));
-    if (source.right <= source.left || source.bottom <= source.top) return false;
+    float sourceWidth = clientWidth * xScale;
+    float sourceHeight = clientHeight * yScale;
+    sourceWidth = std::min(sourceWidth, static_cast<float>(g_app.glassWidth));
+    sourceHeight = std::min(sourceHeight, static_cast<float>(g_app.glassHeight));
+    if (sourceWidth <= 0.0f || sourceHeight <= 0.0f) return false;
+
+    // Slide the crop when the window leaves the sampled area instead of shrinking
+    // it: a resized source rect would stretch the glass over the whole window.
+    const float maxLeft = std::max(0.0f, static_cast<float>(g_app.glassWidth) - sourceWidth);
+    const float maxTop = std::max(0.0f, static_cast<float>(g_app.glassHeight) - sourceHeight);
+    const float sourceLeft = std::min(
+        std::max((origin.x - g_app.glassScreenX) * xScale, 0.0f), maxLeft);
+    const float sourceTop = std::min(
+        std::max((origin.y - g_app.glassScreenY) * yScale, 0.0f), maxTop);
+    const D2D1_RECT_F source =
+        D2D1::RectF(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight);
 
     const float scale = 96.0f / static_cast<float>(g_app.dpi);
     const D2D1_RECT_F destination =
@@ -647,41 +654,32 @@ void DrawAppMark(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect) {
     ComPtr<ID2D1Factory> factory;
     rt->GetFactory(factory.Put());
     if (!factory) return;
-    ComPtr<ID2D1PathGeometry> geometry;
-    if (FAILED(factory->CreatePathGeometry(geometry.Put())) || !geometry) return;
-    ComPtr<ID2D1GeometrySink> sink;
-    if (FAILED(geometry->Open(sink.Put())) || !sink) return;
+    D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(
+        D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+        D2D1_LINE_JOIN_ROUND, 10.0f);
+    ComPtr<ID2D1StrokeStyle> strokeStyle;
+    if (FAILED(factory->CreateStrokeStyle(props, nullptr, 0, strokeStyle.Put())) || !strokeStyle) {
+        return;
+    }
 
     const float unit = size / 1024.0f;
     auto point = [&](float x, float y) {
         return D2D1::Point2F(rect.left + x * unit, rect.top + y * unit);
     };
-    auto corner = [&](float ax, float ay, float bx, float by, float cx, float cy, float dx,
-                      float dy, float ex, float ey) {
-        sink->BeginFigure(point(ax, ay), D2D1_FIGURE_BEGIN_HOLLOW);
-        sink->AddLine(point(bx, by));
-        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(point(cx, cy), point(dx, dy)));
-        sink->AddLine(point(ex, ey));
-        sink->EndFigure(D2D1_FIGURE_END_OPEN);
-    };
-    corner(260, 480, 260, 340, 260, 260, 340, 260, 440, 260);
-    corner(584, 260, 684, 260, 764, 260, 764, 340, 764, 480);
-    corner(764, 544, 764, 684, 764, 764, 684, 764, 584, 764);
-    corner(440, 764, 340, 764, 260, 764, 260, 684, 260, 544);
-    sink->BeginFigure(point(370, 512), D2D1_FIGURE_BEGIN_HOLLOW);
-    sink->AddLine(point(654, 512));
-    sink->EndFigure(D2D1_FIGURE_END_OPEN);
-    sink->Close();
-
-    D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(
-        D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
-        D2D1_LINE_JOIN_ROUND, 10.0f);
-    ComPtr<ID2D1StrokeStyle> strokeStyle;
-    factory->CreateStrokeStyle(props, nullptr, 0, strokeStyle.Put());
-
     SetBrushColor(g_app.brush.Get(), D2D1::ColorF(D2D1::ColorF::White));
-    rt->DrawGeometry(geometry.Get(), g_app.brush.Get(), std::max(1.0f, size * (70.0f / 1024.0f)),
-                     strokeStyle.Get());
+    const float stroke = std::max(1.0f, size * (70.0f / 1024.0f));
+    auto segment = [&](float ax, float ay, float bx, float by) {
+        rt->DrawLine(point(ax, ay), point(bx, by), g_app.brush.Get(), stroke, strokeStyle.Get());
+    };
+    segment(260, 480, 260, 260);
+    segment(260, 260, 440, 260);
+    segment(584, 260, 764, 260);
+    segment(764, 260, 764, 480);
+    segment(764, 544, 764, 764);
+    segment(764, 764, 584, 764);
+    segment(440, 764, 260, 764);
+    segment(260, 764, 260, 544);
+    segment(370, 512, 654, 512);
 }
 
 void DrawCaptionButton(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, int control, bool close) {
@@ -2217,17 +2215,42 @@ void ApplyGlassCapture(const ScreenFrame& frame, std::vector<uint32_t>&& pixels,
 void SampleLiveBackdrop(HWND hwnd) {
     RECT windowRect{};
     if (!GetWindowRect(hwnd, &windowRect)) return;
-    // Sample a little beyond the window so the blur has real context at the edges.
-    InflateRect(&windowRect, kLiveSampleMarginPx, kLiveSampleMarginPx);
+    // Sample well beyond the window so a fast drag keeps the desktop anchored
+    // under the glass instead of running off the edge of the texture.
+    const int span = std::max(windowRect.right - windowRect.left,
+                              windowRect.bottom - windowRect.top);
+    const int margin = std::max(kLiveSampleMarginPx, span / 2);
+    InflateRect(&windowRect, margin, margin);
+
+    // Keep the rect inside the virtual desktop: BitBlt from off-screen
+    // coordinates returns black and would flash through the glass.
+    const LONG deskLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const LONG deskTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const LONG deskRight = deskLeft + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const LONG deskBottom = deskTop + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    RECT sample{std::max(windowRect.left, deskLeft), std::max(windowRect.top, deskTop),
+                std::min(windowRect.right, deskRight), std::min(windowRect.bottom, deskBottom)};
+    if (sample.right - sample.left < 16 || sample.bottom - sample.top < 16) return;
 
     ScreenFrame frame;
     std::vector<uint32_t> pixels;
     int width = 0;
     int height = 0;
-    if (!CaptureScreenRect(windowRect, &frame, nullptr) ||
+    if (!CaptureScreenRect(sample, &frame, nullptr) ||
         !BuildGlassImage(frame, kLiveGlassFactor, &pixels, &width, &height)) {
         return;
     }
+
+    // Hardware-accelerated or protected surfaces can come back uniformly black
+    // from a GDI grab; keeping the previous texture avoids a black flash.
+    uint64_t sum = 0;
+    for (uint32_t pixel : pixels) {
+        sum += (pixel & 0xffu) + ((pixel >> 8) & 0xffu) + ((pixel >> 16) & 0xffu);
+    }
+    const double mean = pixels.empty() ? 0.0 : static_cast<double>(sum) /
+                                                   (static_cast<double>(pixels.size()) * 3.0);
+    if (mean < 3.0 && g_app.glassAvailable) return;
+
     ApplyGlassCapture(frame, std::move(pixels), width, height);
     InvalidateRect(hwnd, nullptr, FALSE);
 }

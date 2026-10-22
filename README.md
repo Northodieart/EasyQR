@@ -132,8 +132,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.4.9-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.4.9-x64-setup.exe` | 安装版 |
+| `EasyQR-1.4.10-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.4.10-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -167,7 +167,7 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 ```bash
 sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 ./tests/run_tests.sh     # 原生 URL / 码制解码回归测试
-./scripts/build.sh       # 生成 v1.4.9 便携版与安装版
+./scripts/build.sh       # 生成 v1.4.10 便携版与安装版
 ```
 
 ### 发布新版本
@@ -175,8 +175,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.4.9
-git push origin v1.4.9
+git tag v1.4.10
+git push origin v1.4.10
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -221,6 +221,13 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.4.10
+
+- 修复动态模糊快速拖动时背景被拉伸变形：窗口移出已采样区域时，源矩形此前是「缩小夹取」，同一块内容会被铺满整个窗口；现在改为保持源尺寸只平移夹取，玻璃只会在边缘轻微粘滞，不再变形。同时把采样留白从固定 48 px 改为随窗口尺寸放大（至少半个窗口），常规拖动全程都在采样范围内。
+- 修复动态模糊快速拖动时偶发的纯黑背景：采样矩形现在限制在虚拟桌面内（越界取屏会返回黑），并且全黑样本会被丢弃而沿用上一帧纹理（硬件加速 / 受保护窗口被 GDI 抓成全黑时不再闪黑）。
+- 标题栏应用标记改用等距线段描边，避免部分 Direct2D 实现对路径描边产生越界杂线；图形比例与 `assets/easyqr.svg` 保持一致。
+- 重新截取设置页与主界面截图。
 
 ### 1.4.9
 
