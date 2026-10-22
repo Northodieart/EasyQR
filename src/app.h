@@ -5,6 +5,8 @@
 
 enum class MainView { Home, Settings };
 
+enum class UpdateState { Idle, Checking, Available, Downloading, UpToDate, Error };
+
 struct AppState {
     enum class StatusKind { None, Info, Error };
 
@@ -34,10 +36,26 @@ struct AppState {
     Palette palette{};
     FontSet fonts{};
 
+    UpdateState updateState = UpdateState::Idle;
+    std::wstring updateMessage;
+    std::wstring updateVersion;
+    std::wstring updateTag;
+    std::thread updateThread;
+
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> dwrite;
-    ComPtr<ID2D1HwndRenderTarget> rt;
+    ComPtr<ID2D1RenderTarget> rt;
+    ID2D1HwndRenderTarget* hwndTarget = nullptr;
+    ID2D1DeviceContext* d2dContext = nullptr;
     ComPtr<ID2D1SolidColorBrush> brush;
+    ComPtr<ID2D1Bitmap1> targetBitmap;
+    ComPtr<ID3D11Device> d3dDevice;
+    ComPtr<IDXGISwapChain1> swapChain;
+    ComPtr<IDCompositionDevice> compositionDevice;
+    ComPtr<IDCompositionTarget> compositionTarget;
+    ComPtr<IDCompositionVisual> compositionVisual;
+    bool compositionMode = false;
+    bool micaEnabled = false;
 
     UINT dpi = 96;
     int hoverControl = -1;

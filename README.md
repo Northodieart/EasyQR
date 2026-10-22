@@ -2,9 +2,9 @@
 
 [![build](https://github.com/Northodieart/EasyQR/actions/workflows/build.yml/badge.svg)](https://github.com/Northodieart/EasyQR/actions/workflows/build.yml)
 
-EasyQR 是一个面向 **Windows 11 x64** 的轻量屏幕二维码 / 条码识别工具。启动后点击「全屏识别」或「框选识别」：识别出的网页直接交给系统默认浏览器；没有网页的内容会进入识别结果面板，可查看并复制。也可以关闭主界面常驻托盘，用全局快捷键随时唤起扫描。
+EasyQR 是一个面向 **Windows 11 x64** 的轻量屏幕二维码 / 条码识别工具。启动后点击「全屏识别」或「框选识别」：识别出的网页直接交给系统默认浏览器；没有网页的内容会进入识别结果面板，可查看并复制。也可以关闭主界面常驻托盘，用全局快捷键随时唤起扫描，并在设置中从 GitHub 检查安装更新。
 
-界面为原生 Win32 + Direct2D / DirectWrite + DWM 实现的 Fluent 风格，参考 Windows 11「截图工具」；不依赖 WinUI 3 / .NET 运行时，便携版只是一个约 2 MB 的 EXE。
+界面为原生 Win32 + Direct2D / DirectWrite + DWM 实现的 Fluent 风格，使用 Windows 11 系统 Mica 云母背景和一体化无边框标题栏；不依赖 WinUI 3 / .NET 运行时，便携版只是一个约 2.3 MB 的 EXE。界面事件驱动、无常驻动画，隐藏到托盘或最小化时会释放图形资源。
 
 | 主界面 · 浅色 | 主界面 · 深色 |
 | --- | --- |
@@ -18,12 +18,26 @@ EasyQR 是一个面向 **Windows 11 x64** 的轻量屏幕二维码 / 条码识�
 
 ![识别结果面板](docs/screenshots/result-panel.png)
 
+> 截图为 Wine 验证环境下的界面示意，不显示 Windows 11 的 Mica 云母背景；真机上窗口底材由 DWM 原生绘制。
+
 ## 功能
 
-### 紧凑主界面
+### 紧凑主界面与原生外观
 
-- 主窗口只有 **全屏识别**、**框选识别** 两个大图标入口，以及右上角的设置入口，默认尺寸约 400 × 240 DIP，尽量不遮挡屏幕。
-- 设置页按需展开，包含外观、常规、快捷键、关于与隐私信息。
+- 主窗口只有 **全屏识别**、**框选识别** 两个大图标入口，默认尺寸约 400 × 240 DIP，尽量不遮挡屏幕。
+- 自定义无边框标题栏：应用图标、设置、最小化、关闭集中在一行，不显示原生标题栏，也没有最大化按钮。
+- 除识别卡片、设置/标题栏按钮等可交互控件外，窗口任意空白区域都可以按住拖动。
+- Windows 11 上启用系统 **Mica** 云母背景，整个窗口是一块连续面板；浅色 / 深色 / 跟随系统主题会同步应用到背景和控件。
+- Windows 10 或 Mica 不可用时自动回退为纯色背景，标题栏和布局保持一致。
+- 设置页按需展开为 400 × 520 DIP，包含外观、常规、快捷键、关于与更新。
+- 应用图标为扁平的扫描框图形，设置使用经典齿轮图标，整体遵循 Windows 11 Fluent 的圆角、留白与配色。
+
+### 资源占用
+
+- 背景由 DWM 绘制系统 Mica，不使用自绘实时模糊或亚克力叠加，也不运行常驻动画、轮询或逐帧刷新。
+- 界面只在交互、主题变化或窗口重绘时刷新。
+- 隐藏到托盘或最小化时释放 Direct3D / DirectComposition / Direct2D 资源，重新显示时按需创建。
+- GitHub 更新检查只在点击按钮时联网，不在后台轮询。
 
 ### 托盘常驻与开机自启
 
@@ -32,6 +46,15 @@ EasyQR 是一个面向 **Windows 11 x64** 的轻量屏幕二维码 / 条码识�
 - 「开机自启动（仅托盘）」：写入当前用户的 Windows 启动项（`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`）。登录 Windows 后程序直接在托盘启动，不展示主界面，并自动注册全局快捷键。
 - 单实例：程序已在托盘时再次启动会唤起现有窗口，不会重复创建托盘图标。
 - 从托盘/快捷键发起的扫描结束后会返回托盘，不会打断当前工作。
+
+### GitHub 自动更新
+
+- 设置 → 关于与更新 → 「检查更新」，通过 GitHub Releases 获取最新正式版本；只有用户点击时才访问网络。
+- 发现新版本后，按钮会变为「更新到 vX.Y.Z」；点击后自动下载对应资产并用 Release 中的 `SHA256SUMS.txt` 校验。
+- **安装版**：通过 UAC 启动下载的安装程序，使用 `/S /EASYQRUPDATE` 静默更新；保留原安装目录与桌面快捷方式选择，安装完成后自动启动新版本。
+- **便携版**：校验通过后原地替换 `EasyQR.exe` 并重启，旧文件在下次启动时清理；不需要安装或管理员权限。
+- 更新失败、网络不可用或尚无正式 Release 时会在设置页给出提示，不影响扫码功能。
+- 发布新版本时推送 `v*` tag，GitHub Actions 会自动构建并发布包含 `EasyQR.exe`、便携 zip、安装包和 `SHA256SUMS.txt` 的 Release。
 
 ### 全局快捷键
 
@@ -76,7 +99,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 ## 隐私
 
 - 屏幕截图、灰度图和识别结果全部保留在**内存**中，不写入任何临时图片文件。
-- 不保存扫描历史、图像或识别结果；应用本身不发起网络请求。
+- 不保存扫描历史、图像或识别结果，不做任何遥测。
+- 除用户主动点击「检查更新」外，应用不发起网络请求；更新检查通过 GitHub API 获取版本，并从 GitHub Releases 下载更新文件和 SHA-256 清单。下载的临时文件位于 `%TEMP%\EasyQR`，验证完成后删除，残留会在下次启动时清理。
 - 只有在用户触发结果时，才通过系统 `ShellExecute` 交给默认浏览器打开目标网页；只有点击「复制内容」时才写入剪贴板。
 - 会持久化的内容只有偏好设置：
   - `HKCU\Software\EasyQR\ThemeMode`（主题）
@@ -87,8 +111,9 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 
 ## 系统要求
 
-- Windows 11 x64（推荐）。
-- Windows 10 x64 亦可运行，但 DWM 圆角 / Mica 标题栏等 Win11 特性会由系统降级。
+- Windows 11 x64（推荐，Mica 云母背景需要 Windows 11 22H2 或更高版本）。
+- Windows 10 x64 亦可运行，但 Mica 和系统圆角等 Win11 特性会自动降级为纯色无边框界面。
+- 自动更新安装版需要联网并在启动安装程序时确认一次 UAC；便携版自动更新不需要管理员权限。
 - 不依赖 .NET、WinUI 运行时、WebView2 或 VC++ Redistributable。
 
 ## 下载与安装
@@ -98,8 +123,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.3.0-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.3.0-x64-setup.exe` | 安装版 |
+| `EasyQR-1.4.0-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.4.0-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -132,8 +157,19 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 ```bash
 sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 ./tests/run_tests.sh     # 原生 URL / 码制解码回归测试
-./scripts/build.sh       # 生成 v1.3.0 便携版与安装版
+./scripts/build.sh       # 生成 v1.4.0 便携版与安装版
 ```
+
+### 发布新版本
+
+自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
+
+```bash
+git tag v1.4.0
+git push origin v1.4.0
+```
+
+发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
 
 ### Windows（MSYS2 MinGW-w64）
 
@@ -149,18 +185,20 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 
 - URL 解析与安全过滤：http/https、裸域名、端口、IPv6、拒绝凭据 / 非网页协议 / 控制字符等。
 - 码制 fixtures：单码、6 码同屏、圆点风格带 Logo、小尺寸、反色、无码，以及 Code 128、EAN-13、Data Matrix、Aztec、PDF417、Code 39。
-- 已在 Ubuntu 24.04 + Wine 9（Xvfb + Openbox）做过端到端验证：紧凑主界面、主题切换与重启恢复、托盘常驻与隐藏、托盘菜单、默认与自定义全局快捷键、开机自启动隐藏启动、单实例唤起、全屏多码识别、艺术化单码自动打开、条码/文本结果面板与剪贴板复制、框选识别、取消与安装 / 卸载。
-- DWM Mica / 圆角标题栏以及 Windows 系统托盘/启动项的最终外观属于 Windows 系统行为，尚未在物理 Windows 11 机器上复测。
+- 已在 Ubuntu 24.04 + Wine 9（Xvfb + Openbox）做过端到端验证：一体化无边框标题栏、空白区拖动、最小化 / 恢复 / 关闭、主题切换与重启恢复、托盘常驻与隐藏、托盘菜单、默认与自定义全局快捷键、开机自启动隐藏启动、单实例唤起、全屏多码识别、艺术化单码自动打开、条码/文本结果面板与剪贴板复制、框选识别、取消与安装 / 卸载。
+- 自动更新另做了真实 GitHub API 解析、本地模拟 Release 下载、SHA-256 校验、安装版静默更新和便携版原地替换测试。
+- DWM Mica / 系统圆角、Windows 原生托盘与通知外观尚未在物理 Windows 11 机器上复测；Wine 截图使用纯色回退界面。
 
 ## 项目结构
 
 ```
 src/
-  main.cpp       主界面、设置页、托盘、快捷键、主题切换与 Fluent 绘制
+  main.cpp       主界面、无边框标题栏、Mica/DComp、设置页、托盘、快捷键、更新 UI
   overlay.cpp    截图遮罩、框选、码按钮、结果面板、浏览器/剪贴板动作
   capture.cpp    GDI 虚拟桌面截图（仅内存）
   qr.cpp         ZXing 全格式主解码 + quirc 兜底
   settings.cpp   主题 / 托盘 / 快捷键 / 开机自启动偏好
+  update.cpp     GitHub Releases 检查、下载、SHA-256 校验、静默/便携更新
   url.cpp        网页地址校验与规范化
   render.cpp     调色板、字体、图标、文本绘制
 vendor/zxing-cpp/  ZXing-C++ 2.2.1（Apache-2.0）
@@ -171,6 +209,16 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.4.0
+
+- 主界面改为一体化无边框标题栏：应用图标、设置齿轮、最小化、关闭排列在顶部同一行，移除原生标题栏和最大化按钮。
+- Windows 11 上启用系统 Mica 云母背景，深色 / 浅色主题同步应用到整块窗口；Windows 10 自动回退纯色背景。
+- 除识别卡片和可点击控件外，窗口任意空白区域按住即可拖动。
+- 全新的扁平扫描框应用图标与经典齿轮设置图标，界面细节按 Windows 11 Fluent 风格调整。
+- 设置页新增「关于与更新」：从 GitHub Releases 检查更新，下载后校验 SHA-256；安装版静默更新，便携版原地替换并重启。
+- 隐藏到托盘或最小化时释放 D3D / DirectComposition / Direct2D 资源；无动画计时器，保持低占用。
+- 安装器支持 `/EASYQRUPDATE` 静默更新模式，并保留原安装目录和桌面快捷方式选择。
 
 ### 1.3.0
 

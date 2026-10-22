@@ -1,8 +1,10 @@
 #include "app.h"
 #include "overlay.h"
 #include "resource.h"
+#include "update.h"
 #include "version.h"
 
+#include <cstring>
 #include <cwchar>
 
 AppState g_app;
@@ -11,11 +13,14 @@ namespace {
 
 constexpr float kClientWidth = 400.0f;
 constexpr float kHomeClientHeight = 240.0f;
-constexpr float kSettingsClientHeight = 500.0f;
+constexpr float kSettingsClientHeight = 520.0f;
+constexpr float kTitleBarHeight = 44.0f;
 
 constexpr UINT kTrayCallbackMessage = WM_APP + 20;
 constexpr UINT kShowMainMessage = WM_APP + 21;
 constexpr UINT kQuitForInstallerMessage = WM_APP + 22;
+constexpr UINT kUpdateCheckDoneMessage = WM_APP + 30;
+constexpr UINT kUpdateReadyMessage = WM_APP + 31;
 constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
 
@@ -34,6 +39,8 @@ enum ControlId : int {
     kFullScreen = 0,
     kRegion = 1,
     kSettings = 2,
+    kMinimize = 3,
+    kClose = 4,
     kBack = 10,
     kThemeSystem = 11,
     kThemeLight = 12,
@@ -42,25 +49,31 @@ enum ControlId : int {
     kAutoStartControl = 15,
     kHotkeyFullscreenControl = 16,
     kHotkeyRegionControl = 17,
+    kUpdateButton = 18,
 };
 
 const D2D1_RECT_F kTileRects[2] = {
-    D2D1::RectF(24.0f, 48.0f, 192.0f, 208.0f),
-    D2D1::RectF(208.0f, 48.0f, 376.0f, 208.0f),
+    D2D1::RectF(24.0f, 56.0f, 192.0f, 212.0f),
+    D2D1::RectF(208.0f, 56.0f, 376.0f, 212.0f),
 };
-const D2D1_RECT_F kSettingsRect = D2D1::RectF(344.0f, 12.0f, 376.0f, 44.0f);
-const D2D1_RECT_F kBackRect = D2D1::RectF(16.0f, 10.0f, 48.0f, 42.0f);
+const D2D1_RECT_F kTitleSettingsRect = D2D1::RectF(268.0f, 0.0f, 312.0f, 44.0f);
+const D2D1_RECT_F kMinimizeRect = D2D1::RectF(312.0f, 0.0f, 356.0f, 44.0f);
+const D2D1_RECT_F kCloseRect = D2D1::RectF(356.0f, 0.0f, 400.0f, 44.0f);
+const D2D1_RECT_F kAppMarkRect = D2D1::RectF(16.0f, 12.0f, 36.0f, 32.0f);
+const D2D1_RECT_F kBackRect = D2D1::RectF(44.0f, 4.0f, 80.0f, 40.0f);
+const D2D1_RECT_F kTitleTextRect = D2D1::RectF(84.0f, 0.0f, 264.0f, 44.0f);
 const D2D1_RECT_F kThemeRects[3] = {
-    D2D1::RectF(24.0f, 88.0f, 136.0f, 122.0f),
-    D2D1::RectF(144.0f, 88.0f, 256.0f, 122.0f),
-    D2D1::RectF(264.0f, 88.0f, 376.0f, 122.0f),
+    D2D1::RectF(24.0f, 82.0f, 136.0f, 116.0f),
+    D2D1::RectF(144.0f, 82.0f, 256.0f, 116.0f),
+    D2D1::RectF(264.0f, 82.0f, 376.0f, 116.0f),
 };
-const D2D1_RECT_F kCloseToTrayRow = D2D1::RectF(24.0f, 170.0f, 376.0f, 204.0f);
-const D2D1_RECT_F kCloseToTraySwitch = D2D1::RectF(328.0f, 174.0f, 376.0f, 200.0f);
-const D2D1_RECT_F kAutoStartRow = D2D1::RectF(24.0f, 210.0f, 376.0f, 244.0f);
-const D2D1_RECT_F kAutoStartSwitch = D2D1::RectF(328.0f, 214.0f, 376.0f, 240.0f);
-const D2D1_RECT_F kHotkeyFullscreenButton = D2D1::RectF(196.0f, 290.0f, 376.0f, 324.0f);
-const D2D1_RECT_F kHotkeyRegionButton = D2D1::RectF(196.0f, 328.0f, 376.0f, 362.0f);
+const D2D1_RECT_F kCloseToTrayRow = D2D1::RectF(24.0f, 156.0f, 376.0f, 190.0f);
+const D2D1_RECT_F kCloseToTraySwitch = D2D1::RectF(328.0f, 160.0f, 376.0f, 186.0f);
+const D2D1_RECT_F kAutoStartRow = D2D1::RectF(24.0f, 194.0f, 376.0f, 228.0f);
+const D2D1_RECT_F kAutoStartSwitch = D2D1::RectF(328.0f, 198.0f, 376.0f, 224.0f);
+const D2D1_RECT_F kHotkeyFullscreenButton = D2D1::RectF(196.0f, 270.0f, 376.0f, 304.0f);
+const D2D1_RECT_F kHotkeyRegionButton = D2D1::RectF(196.0f, 308.0f, 376.0f, 342.0f);
+const D2D1_RECT_F kUpdateButtonRect = D2D1::RectF(236.0f, 404.0f, 376.0f, 436.0f);
 
 float ClientHeightForView() {
     return g_app.view == MainView::Settings ? kSettingsClientHeight : kHomeClientHeight;
@@ -94,6 +107,230 @@ void SetDwmAttribute(HWND hwnd, DWORD attribute, const void* value, DWORD size) 
     if (hwnd) DwmSetWindowAttribute(hwnd, attribute, value, size);
 }
 
+struct OsVersionInfo {
+    ULONG size;
+    ULONG major;
+    ULONG minor;
+    ULONG build;
+    ULONG platform;
+    wchar_t servicePack[128];
+};
+
+bool IsWindows11OrGreater() {
+    using RtlGetVersionFn = LONG(WINAPI*)(OsVersionInfo*);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    FARPROC procedure = ntdll ? GetProcAddress(ntdll, "RtlGetVersion") : nullptr;
+    RtlGetVersionFn getVersion = nullptr;
+    std::memcpy(&getVersion, &procedure, sizeof(getVersion));
+    if (!getVersion) return false;
+    OsVersionInfo info{};
+    info.size = sizeof(info);
+    if (getVersion(&info) != 0) return false;
+    return info.major >= 10 && info.build >= 22000;
+}
+
+bool ShouldUseComposition() {
+    static const bool supported = IsWindows11OrGreater();
+    return supported;
+}
+
+void UpdatePalette();
+
+bool CreateRenderBrush() {
+    g_app.brush.Reset();
+    if (!g_app.rt) return false;
+    ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(g_app.rt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), brush.Put())) ||
+        !brush) {
+        return false;
+    }
+    g_app.brush = std::move(brush);
+    return true;
+}
+
+bool CreateCompositionTargetBitmap() {
+    if (!g_app.d2dContext || !g_app.swapChain) return false;
+    g_app.d2dContext->SetTarget(nullptr);
+    g_app.targetBitmap.Reset();
+
+    ComPtr<IDXGISurface> surface;
+    if (FAILED(g_app.swapChain->GetBuffer(
+            0, __uuidof(IDXGISurface), reinterpret_cast<void**>(surface.Put()))) ||
+        !surface) {
+        return false;
+    }
+
+    D2D1_BITMAP_PROPERTIES1 properties{};
+    properties.pixelFormat =
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+    properties.dpiX = static_cast<float>(g_app.dpi);
+    properties.dpiY = static_cast<float>(g_app.dpi);
+    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    if (FAILED(g_app.d2dContext->CreateBitmapFromDxgiSurface(
+            surface.Get(), &properties, g_app.targetBitmap.Put())) ||
+        !g_app.targetBitmap) {
+        return false;
+    }
+    g_app.d2dContext->SetTarget(g_app.targetBitmap.Get());
+    return true;
+}
+
+void EnableMicaIfAvailable(HWND hwnd) {
+    if (!hwnd || !g_app.compositionMode) return;
+    int backdrop = 2;  // DWMSBT_MAINWINDOW
+    const HRESULT hr = DwmSetWindowAttribute(hwnd, 38, &backdrop, sizeof(backdrop));
+    if (SUCCEEDED(hr)) {
+        MARGINS margins{-1, -1, -1, -1};
+        DwmExtendFrameIntoClientArea(hwnd, &margins);
+        g_app.micaEnabled = true;
+        UpdatePalette();
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+}
+
+bool InitializeCompositionRenderer(HWND hwnd, UINT width, UINT height) {
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
+                                        D3D_FEATURE_LEVEL_10_0};
+    const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    ComPtr<ID3D11DeviceContext> deviceContext;
+    ComPtr<ID3D11Device> device;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels,
+                                   ARRAYSIZE(levels), D3D11_SDK_VERSION, device.Put(), nullptr,
+                                   deviceContext.Put());
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, levels,
+                               ARRAYSIZE(levels), D3D11_SDK_VERSION, device.Put(), nullptr,
+                               deviceContext.Put());
+    }
+    if (FAILED(hr) || !device) return false;
+
+    ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice),
+                                      reinterpret_cast<void**>(dxgiDevice.Put()))) ||
+        !dxgiDevice) {
+        return false;
+    }
+
+    ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDevice->GetAdapter(adapter.Put())) || !adapter) return false;
+    ComPtr<IDXGIFactory2> dxgiFactory;
+    if (FAILED(adapter->GetParent(__uuidof(IDXGIFactory2),
+                                  reinterpret_cast<void**>(dxgiFactory.Put()))) ||
+        !dxgiFactory) {
+        return false;
+    }
+
+    DXGI_SWAP_CHAIN_DESC1 description{};
+    description.Width = width;
+    description.Height = height;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    description.BufferCount = 2;
+    description.Scaling = DXGI_SCALING_STRETCH;
+    description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    description.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+
+    ComPtr<IDXGISwapChain1> swapChain;
+    if (FAILED(dxgiFactory->CreateSwapChainForComposition(device.Get(), &description, nullptr,
+                                                          swapChain.Put())) ||
+        !swapChain) {
+        return false;
+    }
+
+    ComPtr<ID2D1Factory1> d2dFactory;
+    if (FAILED(g_app.d2d->QueryInterface(__uuidof(ID2D1Factory1),
+                                         reinterpret_cast<void**>(d2dFactory.Put()))) ||
+        !d2dFactory) {
+        return false;
+    }
+    ComPtr<ID2D1Device> d2dDevice;
+    if (FAILED(d2dFactory->CreateDevice(dxgiDevice.Get(), d2dDevice.Put())) || !d2dDevice) {
+        return false;
+    }
+    ComPtr<ID2D1DeviceContext> context;
+    if (FAILED(d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, context.Put())) ||
+        !context) {
+        return false;
+    }
+
+    ComPtr<IDCompositionDevice> compositionDevice;
+    if (FAILED(DCompositionCreateDevice(dxgiDevice.Get(), __uuidof(IDCompositionDevice),
+                                        reinterpret_cast<void**>(compositionDevice.Put()))) ||
+        !compositionDevice) {
+        return false;
+    }
+    ComPtr<IDCompositionTarget> compositionTarget;
+    if (FAILED(compositionDevice->CreateTargetForHwnd(hwnd, TRUE, compositionTarget.Put())) ||
+        !compositionTarget) {
+        return false;
+    }
+    ComPtr<IDCompositionVisual> compositionVisual;
+    if (FAILED(compositionDevice->CreateVisual(compositionVisual.Put())) || !compositionVisual) {
+        return false;
+    }
+    if (FAILED(compositionVisual->SetContent(swapChain.Get())) ||
+        FAILED(compositionTarget->SetRoot(compositionVisual.Get())) ||
+        FAILED(compositionDevice->Commit())) {
+        return false;
+    }
+
+    g_app.d3dDevice = std::move(device);
+    g_app.swapChain = std::move(swapChain);
+    g_app.compositionDevice = std::move(compositionDevice);
+    g_app.compositionTarget = std::move(compositionTarget);
+    g_app.compositionVisual = std::move(compositionVisual);
+    g_app.d2dContext = context.Get();
+    g_app.rt.Attach(context.Detach());
+    g_app.rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    g_app.rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    g_app.rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
+    if (!CreateCompositionTargetBitmap() || !CreateRenderBrush()) {
+        g_app.d2dContext = nullptr;
+        g_app.rt.Reset();
+        g_app.swapChain.Reset();
+        g_app.compositionDevice.Reset();
+        g_app.compositionTarget.Reset();
+        g_app.compositionVisual.Reset();
+        g_app.targetBitmap.Reset();
+        g_app.d3dDevice.Reset();
+        return false;
+    }
+
+    g_app.compositionMode = true;
+    EnableMicaIfAvailable(hwnd);
+    UpdatePalette();
+    return true;
+}
+
+bool InitializeHwndRenderer(HWND hwnd, UINT width, UINT height) {
+    const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+
+    ComPtr<ID2D1HwndRenderTarget> target;
+    const HRESULT hr = g_app.d2d->CreateHwndRenderTarget(
+        properties, D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(width, height)),
+        target.Put());
+    if (FAILED(hr) || !target) return false;
+
+    target->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
+    target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+
+    g_app.hwndTarget = target.Get();
+    g_app.rt.Attach(target.Detach());
+    g_app.compositionMode = false;
+    g_app.micaEnabled = false;
+    if (!CreateRenderBrush()) {
+        g_app.hwndTarget = nullptr;
+        g_app.rt.Reset();
+        return false;
+    }
+    UpdatePalette();
+    return true;
+}
+
 void EnsureRenderTarget(HWND hwnd) {
     if (g_app.rt || !g_app.d2d) return;
 
@@ -102,35 +339,59 @@ void EnsureRenderTarget(HWND hwnd) {
     const UINT width = static_cast<UINT>(std::max<LONG>(1, client.right - client.left));
     const UINT height = static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top));
 
-    const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+    if (ShouldUseComposition()) {
+        if (InitializeCompositionRenderer(hwnd, width, height)) return;
+    }
+    InitializeHwndRenderer(hwnd, width, height);
+}
 
-    ComPtr<ID2D1HwndRenderTarget> target;
-    HRESULT hr = g_app.d2d->CreateHwndRenderTarget(
-        properties, D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(width, height)),
-        target.Put());
-    if (FAILED(hr) || !target) return;
-
-    target->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-
-    ComPtr<ID2D1SolidColorBrush> brush;
-    hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), brush.Put());
-    if (FAILED(hr) || !brush) return;
-
-    g_app.rt = std::move(target);
-    g_app.brush = std::move(brush);
+void ResizeRenderTarget(UINT width, UINT height) {
+    if (g_app.compositionMode && g_app.d2dContext && g_app.swapChain) {
+        g_app.d2dContext->SetTarget(nullptr);
+        g_app.targetBitmap.Reset();
+        if (SUCCEEDED(g_app.swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0))) {
+            CreateCompositionTargetBitmap();
+            if (g_app.compositionDevice) g_app.compositionDevice->Commit();
+        }
+        return;
+    }
+    if (g_app.hwndTarget) {
+        g_app.hwndTarget->Resize(D2D1::SizeU(width, height));
+    }
 }
 
 void DiscardRenderTarget() {
     g_app.brush.Reset();
+    g_app.hwndTarget = nullptr;
+    g_app.d2dContext = nullptr;
     g_app.rt.Reset();
+    g_app.targetBitmap.Reset();
+    g_app.compositionVisual.Reset();
+    g_app.compositionTarget.Reset();
+    g_app.compositionDevice.Reset();
+    g_app.swapChain.Reset();
+    g_app.d3dDevice.Reset();
+    g_app.compositionMode = false;
+    g_app.micaEnabled = false;
+}
+
+void UpdatePalette() {
+    g_app.palette = MakePalette(g_app.dark);
+    if (!g_app.micaEnabled) return;
+    g_app.palette.page = WithAlpha(g_app.palette.page, g_app.dark ? 0.58f : 0.46f);
+    g_app.palette.card = WithAlpha(g_app.palette.card, g_app.dark ? 0.74f : 0.72f);
+    g_app.palette.cardHover = WithAlpha(g_app.palette.cardHover, 0.82f);
+    g_app.palette.cardPressed = WithAlpha(g_app.palette.cardPressed, 0.76f);
+    g_app.palette.border = WithAlpha(g_app.palette.border, 0.72f);
+    g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, 0.66f);
 }
 
 bool IsFocused(int control) {
     return g_app.keyboardFocus && g_app.focusControl == control && GetFocus() == g_app.hwnd;
+}
+
+bool UsesHandCursor(int control) {
+    return control >= 0 && control != kMinimize && control != kClose;
 }
 
 void CancelHotkeyCapture(bool restoreHotkeys);
@@ -147,18 +408,13 @@ void UnregisterConfiguredHotkeys();
 void HandleHotkeyCaptureKey(WPARAM vk);
 void ShowTrayMenu(HWND hwnd);
 void ResizeWindowForView(HWND hwnd);
+void BeginUpdateAction(HWND hwnd);
 
 void ResizeWindowForView(HWND hwnd) {
     if (!hwnd) return;
     const UINT dpi = DpiOfWindow(hwnd);
-    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
-    const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
-
-    RECT windowRect{0, 0, MulDiv(static_cast<int>(kClientWidth), dpi, 96),
-                    MulDiv(static_cast<int>(ClientHeightForView()), dpi, 96)};
-    AdjustWindowRectExForDpi(&windowRect, style, FALSE, exStyle, dpi);
-    const int width = windowRect.right - windowRect.left;
-    const int height = windowRect.bottom - windowRect.top;
+    const int width = MulDiv(static_cast<int>(kClientWidth), dpi, 96);
+    const int height = MulDiv(static_cast<int>(ClientHeightForView()), dpi, 96);
 
     RECT work{};
     MONITORINFO info{};
@@ -174,11 +430,14 @@ void ResizeWindowForView(HWND hwnd) {
 }
 
 int ControlAt(float x, float y) {
+    if (PointInRect(kTitleSettingsRect, x, y)) return kSettings;
+    if (PointInRect(kMinimizeRect, x, y)) return kMinimize;
+    if (PointInRect(kCloseRect, x, y)) return kClose;
+
     if (g_app.view == MainView::Home) {
         for (int i = 0; i < 2; ++i) {
             if (PointInRect(kTileRects[i], x, y)) return i;
         }
-        if (PointInRect(kSettingsRect, x, y)) return kSettings;
         return kControlNone;
     }
 
@@ -190,13 +449,14 @@ int ControlAt(float x, float y) {
     if (PointInRect(kAutoStartRow, x, y)) return kAutoStartControl;
     if (PointInRect(kHotkeyFullscreenButton, x, y)) return kHotkeyFullscreenControl;
     if (PointInRect(kHotkeyRegionButton, x, y)) return kHotkeyRegionControl;
+    if (PointInRect(kUpdateButtonRect, x, y)) return kUpdateButton;
     return kControlNone;
 }
 
 std::vector<int> FocusOrder() {
     if (g_app.view == MainView::Home) return {kFullScreen, kRegion, kSettings};
-    return {kBack,       kThemeSystem, kThemeLight,           kThemeDark,
-            kCloseToTrayControl, kAutoStartControl, kHotkeyFullscreenControl, kHotkeyRegionControl};
+    return {kBack, kThemeSystem, kThemeLight, kThemeDark, kCloseToTrayControl,
+            kAutoStartControl, kHotkeyFullscreenControl, kHotkeyRegionControl, kUpdateButton};
 }
 
 void ResetInteraction() {
@@ -234,7 +494,7 @@ const wchar_t* ThemeLabel(ThemeMode mode) {
     }
 }
 
-void DrawIconButton(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& rect, IconId icon, int control) {
+void DrawIconButton(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, IconId icon, int control) {
     const bool hovered = g_app.hoverControl == control;
     const bool pressed = g_app.pressedControl == control;
     const bool focused = IsFocused(control);
@@ -256,7 +516,7 @@ void DrawIconButton(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& rect, IconId i
     DrawIcon(rt, icon, iconRect, color, g_app.brush.Get(), 1.35f);
 }
 
-void DrawTile(ID2D1HwndRenderTarget* rt, int index) {
+void DrawTile(ID2D1RenderTarget* rt, int index) {
     const D2D1_RECT_F rect = kTileRects[index];
     const bool hovered = g_app.hoverControl == index;
     const bool pressed = g_app.pressedControl == index;
@@ -310,7 +570,7 @@ void DrawTile(ID2D1HwndRenderTarget* rt, int index) {
     }
 }
 
-void DrawStatus(ID2D1HwndRenderTarget* rt) {
+void DrawStatus(ID2D1RenderTarget* rt) {
     if (g_app.statusKind == AppState::StatusKind::None || g_app.status.empty()) return;
 
     const D2D1_COLOR_F color = g_app.statusKind == AppState::StatusKind::Error
@@ -318,17 +578,112 @@ void DrawStatus(ID2D1HwndRenderTarget* rt) {
                                    : g_app.palette.secondary;
     SetBrushColor(g_app.brush.Get(), color);
     DrawTextEx(rt, g_app.dwrite.Get(), g_app.status, g_app.fonts.footer.Get(),
-               D2D1::RectF(24.0f, 212.0f, 376.0f, 234.0f), g_app.brush.Get(),
+               D2D1::RectF(24.0f, 216.0f, 376.0f, 236.0f), g_app.brush.Get(),
                TextAlign::Center, true, true);
 }
 
-void DrawHome(ID2D1HwndRenderTarget* rt) {
+void DrawAppMark(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect) {
+    const float radius = RectWidth(rect) * 0.28f;
+    SetBrushColor(g_app.brush.Get(), Rgb(0x0078D4));
+    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), g_app.brush.Get());
+
+    const float unit = RectWidth(rect) / 20.0f;
+    const float stroke = std::max(1.35f, 1.55f * unit);
+    D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(
+        D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+        D2D1_LINE_JOIN_ROUND, 10.0f);
+    ComPtr<ID2D1StrokeStyle> strokeStyle;
+    ComPtr<ID2D1Factory> factory;
+    rt->GetFactory(factory.Put());
+    if (factory) factory->CreateStrokeStyle(props, nullptr, 0, strokeStyle.Put());
+
+    SetBrushColor(g_app.brush.Get(), D2D1::ColorF(D2D1::ColorF::White));
+    auto point = [&](float x, float y) {
+        return D2D1::Point2F(rect.left + x * unit, rect.top + y * unit);
+    };
+    auto line = [&](float x0, float y0, float x1, float y1) {
+        rt->DrawLine(point(x0, y0), point(x1, y1), g_app.brush.Get(), stroke,
+                     strokeStyle.Get());
+    };
+
+    line(6.0f, 10.0f, 6.0f, 7.0f);
+    line(6.0f, 7.0f, 10.0f, 7.0f);
+    line(14.0f, 7.0f, 18.0f, 7.0f);
+    line(18.0f, 7.0f, 18.0f, 10.0f);
+    line(6.0f, 14.0f, 6.0f, 17.0f);
+    line(6.0f, 17.0f, 10.0f, 17.0f);
+    line(14.0f, 17.0f, 18.0f, 17.0f);
+    line(18.0f, 17.0f, 18.0f, 14.0f);
+    line(8.0f, 12.0f, 16.0f, 12.0f);
+}
+
+void DrawCaptionButton(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, int control, bool close) {
+    const bool hovered = g_app.hoverControl == control;
+    const bool pressed = g_app.pressedControl == control;
+    if (hovered || pressed) {
+        D2D1_COLOR_F fill = close ? Rgb(0xC42B1C) : g_app.palette.cardHover;
+        if (close && pressed) fill = Rgb(0xB32B1C);
+        SetBrushColor(g_app.brush.Get(), fill);
+        const D2D1_RECT_F hoverRect =
+            D2D1::RectF(rect.left + 4.0f, rect.top + 4.0f, rect.right - 4.0f, rect.bottom - 4.0f);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(hoverRect, 6.0f, 6.0f), g_app.brush.Get());
+    }
+
+    const D2D1_COLOR_F color = close && hovered ? D2D1::ColorF(D2D1::ColorF::White)
+                                                : g_app.palette.text;
+    SetBrushColor(g_app.brush.Get(), color);
+    const float cx = (rect.left + rect.right) * 0.5f;
+    const float cy = (rect.top + rect.bottom) * 0.5f;
+    if (close) {
+        rt->DrawLine(D2D1::Point2F(cx - 5.0f, cy - 5.0f), D2D1::Point2F(cx + 5.0f, cy + 5.0f),
+                     g_app.brush.Get(), 1.1f);
+        rt->DrawLine(D2D1::Point2F(cx + 5.0f, cy - 5.0f), D2D1::Point2F(cx - 5.0f, cy + 5.0f),
+                     g_app.brush.Get(), 1.1f);
+    } else {
+        rt->DrawLine(D2D1::Point2F(cx - 5.0f, cy), D2D1::Point2F(cx + 5.0f, cy),
+                     g_app.brush.Get(), 1.1f);
+    }
+}
+
+void DrawTitleBar(ID2D1RenderTarget* rt) {
+    DrawAppMark(rt, kAppMarkRect);
+
+    if (g_app.view == MainView::Settings) {
+        DrawIconButton(rt, kBackRect, IconId::ArrowLeft, kBack);
+        SetBrushColor(g_app.brush.Get(), g_app.palette.text);
+        DrawTextEx(rt, g_app.dwrite.Get(), L"设置", g_app.fonts.label.Get(), kTitleTextRect,
+                   g_app.brush.Get(), TextAlign::Leading, true, true);
+    } else {
+        SetBrushColor(g_app.brush.Get(), g_app.palette.text);
+        DrawTextEx(rt, g_app.dwrite.Get(), L"EasyQR", g_app.fonts.label.Get(),
+                   D2D1::RectF(44.0f, 0.0f, 264.0f, kTitleBarHeight), g_app.brush.Get(),
+                   TextAlign::Leading, true, true);
+    }
+
+    const bool settingsActive = g_app.view == MainView::Settings;
+    const bool settingsHovered = g_app.hoverControl == kSettings;
+    if (settingsActive || settingsHovered) {
+        const D2D1_RECT_F hoverRect = D2D1::RectF(
+            kTitleSettingsRect.left + 4.0f, 4.0f, kTitleSettingsRect.right - 4.0f, 40.0f);
+        SetBrushColor(g_app.brush.Get(),
+                      settingsActive ? g_app.palette.accentSoft : g_app.palette.cardHover);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(hoverRect, 7.0f, 7.0f), g_app.brush.Get());
+    }
+    DrawIcon(rt, IconId::Settings,
+             D2D1::RectF(kTitleSettingsRect.left + 13.0f, 13.0f, kTitleSettingsRect.right - 13.0f,
+                         31.0f),
+             settingsActive ? g_app.palette.accent : g_app.palette.secondary, g_app.brush.Get(),
+             1.35f);
+    DrawCaptionButton(rt, kMinimizeRect, kMinimize, false);
+    DrawCaptionButton(rt, kCloseRect, kClose, true);
+}
+
+void DrawHome(ID2D1RenderTarget* rt) {
     for (int i = 0; i < 2; ++i) DrawTile(rt, i);
-    DrawIconButton(rt, kSettingsRect, IconId::Settings, kSettings);
     DrawStatus(rt);
 }
 
-void DrawThemeButton(ID2D1HwndRenderTarget* rt, int index) {
+void DrawThemeButton(ID2D1RenderTarget* rt, int index) {
     const int control = kThemeSystem + index;
     const D2D1_RECT_F rect = kThemeRects[index];
     const ThemeMode mode = static_cast<ThemeMode>(index);
@@ -382,7 +737,7 @@ void StrokeRoundedRect(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, float rad
     rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), g_app.brush.Get(), width);
 }
 
-void DrawSwitch(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& rect, bool on, bool hovered,
+void DrawSwitch(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, bool on, bool hovered,
                 bool focused, bool pressed) {
     const float radius = RectHeight(rect) * 0.5f;
     D2D1_COLOR_F track = on ? Rgb(0x0067C0) : g_app.palette.card;
@@ -416,7 +771,7 @@ void DrawSwitch(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& rect, bool on, boo
                     g_app.brush.Get());
 }
 
-void DrawToggleRow(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& row, const D2D1_RECT_F& sw,
+void DrawToggleRow(ID2D1RenderTarget* rt, const D2D1_RECT_F& row, const D2D1_RECT_F& sw,
                    const std::wstring& label, int control, bool value) {
     const bool hovered = g_app.hoverControl == control;
     const bool pressed = g_app.pressedControl == control;
@@ -429,7 +784,7 @@ void DrawToggleRow(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& row, const D2D1
     DrawSwitch(rt, sw, value, hovered, focused, pressed);
 }
 
-void DrawHotkeyButton(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& rect, const std::wstring& label,
+void DrawHotkeyButton(ID2D1RenderTarget* rt, const D2D1_RECT_F& rect, const std::wstring& label,
                       int control, bool capturing, bool disabled) {
     const bool hovered = g_app.hoverControl == control;
     const bool pressed = g_app.pressedControl == control;
@@ -461,31 +816,70 @@ void DrawHotkeyButton(ID2D1HwndRenderTarget* rt, const D2D1_RECT_F& rect, const 
                TextAlign::Center, true, true);
 }
 
-void DrawSettings(ID2D1HwndRenderTarget* rt) {
-    DrawIconButton(rt, kBackRect, IconId::ArrowLeft, kBack);
+void DrawUpdateButton(ID2D1RenderTarget* rt) {
+    const bool busy = g_app.updateState == UpdateState::Checking ||
+                      g_app.updateState == UpdateState::Downloading;
+    const bool hovered = g_app.hoverControl == kUpdateButton;
+    const bool pressed = g_app.pressedControl == kUpdateButton;
 
-    SetBrushColor(g_app.brush.Get(), g_app.palette.text);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"设置", g_app.fonts.heading.Get(),
-               D2D1::RectF(56.0f, 10.0f, 300.0f, 42.0f), g_app.brush.Get(), TextAlign::Leading,
-               true);
+    std::wstring label = L"检查更新";
+    switch (g_app.updateState) {
+        case UpdateState::Checking:
+            label = L"正在检查…";
+            break;
+        case UpdateState::Downloading:
+            label = L"正在下载…";
+            break;
+        case UpdateState::Available:
+            label = L"更新到 v" + g_app.updateVersion;
+            break;
+        case UpdateState::UpToDate:
+            label = L"重新检查";
+            break;
+        case UpdateState::Error:
+            label = L"重试";
+            break;
+        default:
+            break;
+    }
 
+    const D2D1_COLOR_F accent = g_app.dark ? g_app.palette.accent : Rgb(0x0067C0);
+    D2D1_COLOR_F fill = busy ? g_app.palette.card : accent;
+    if (!busy && pressed) {
+        fill = g_app.dark ? Rgb(0x4CC2FF) : Rgb(0x005A9E);
+    } else if (!busy && hovered) {
+        fill = g_app.dark ? Rgb(0x86D6FF) : Rgb(0x106EBE);
+    }
+    SetBrushColor(g_app.brush.Get(), fill);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(kUpdateButtonRect, 8.0f, 8.0f),
+                             g_app.brush.Get());
+
+    SetBrushColor(g_app.brush.Get(),
+                  busy ? g_app.palette.tertiary
+                       : (g_app.dark ? Rgb(0x0A0A0A)
+                                     : D2D1::ColorF(D2D1::ColorF::White)));
+    DrawTextEx(rt, g_app.dwrite.Get(), label, g_app.fonts.chip.Get(), kUpdateButtonRect,
+               g_app.brush.Get(), TextAlign::Center, true, true);
+}
+
+void DrawSettings(ID2D1RenderTarget* rt) {
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 54.0f), D2D1::Point2F(kClientWidth - 24.0f, 54.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 56.0f), D2D1::Point2F(kClientWidth - 24.0f, 56.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"外观", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 64.0f, 200.0f, 84.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 64.0f, 200.0f, 80.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
     for (int i = 0; i < 3; ++i) DrawThemeButton(rt, i);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 136.0f), D2D1::Point2F(kClientWidth - 24.0f, 136.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 128.0f), D2D1::Point2F(kClientWidth - 24.0f, 128.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"常规", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 146.0f, 200.0f, 166.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 138.0f, 200.0f, 156.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
     DrawToggleRow(rt, kCloseToTrayRow, kCloseToTraySwitch, L"关闭窗口时最小化到托盘",
                   kCloseToTrayControl, g_app.closeToTray);
@@ -493,12 +887,12 @@ void DrawSettings(ID2D1HwndRenderTarget* rt) {
                   kAutoStartControl, g_app.autoStart);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 256.0f), D2D1::Point2F(kClientWidth - 24.0f, 256.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 240.0f), D2D1::Point2F(kClientWidth - 24.0f, 240.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"快捷键", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 266.0f, 200.0f, 286.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 250.0f, 200.0f, 268.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
@@ -532,52 +926,91 @@ void DrawSettings(ID2D1HwndRenderTarget* rt) {
     }
     SetBrushColor(g_app.brush.Get(), noteColor);
     DrawTextEx(rt, g_app.dwrite.Get(), note, g_app.fonts.chipSmall.Get(),
-               D2D1::RectF(24.0f, 366.0f, 376.0f, 388.0f), g_app.brush.Get(),
+               D2D1::RectF(24.0f, 346.0f, 376.0f, 364.0f), g_app.brush.Get(),
                TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
-    rt->DrawLine(D2D1::Point2F(24.0f, 396.0f), D2D1::Point2F(kClientWidth - 24.0f, 396.0f),
+    rt->DrawLine(D2D1::Point2F(24.0f, 372.0f), D2D1::Point2F(kClientWidth - 24.0f, 372.0f),
                  g_app.brush.Get(), 1.0f);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"关于", g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 406.0f, 200.0f, 426.0f), g_app.brush.Get(), TextAlign::Leading,
+    DrawTextEx(rt, g_app.dwrite.Get(), L"关于与更新", g_app.fonts.label.Get(),
+               D2D1::RectF(24.0f, 382.0f, 200.0f, 400.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
     DrawTextEx(rt, g_app.dwrite.Get(), L"EasyQR " EASYQR_VERSION_STRING, g_app.fonts.label.Get(),
-               D2D1::RectF(24.0f, 430.0f, 260.0f, 450.0f), g_app.brush.Get(), TextAlign::Leading,
+               D2D1::RectF(24.0f, 408.0f, 220.0f, 428.0f), g_app.brush.Get(), TextAlign::Leading,
                true);
 
-    SetBrushColor(g_app.brush.Get(), g_app.palette.tertiary);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"MIT License", g_app.fonts.footer.Get(),
-               D2D1::RectF(264.0f, 430.0f, 376.0f, 450.0f), g_app.brush.Get(),
-               TextAlign::Trailing, true);
+    DrawUpdateButton(rt);
+
+    std::wstring updateText = L"从 GitHub Releases 检查新版本";
+    D2D1_COLOR_F updateColor = g_app.palette.tertiary;
+    if (!g_app.updateMessage.empty()) {
+        updateText = g_app.updateMessage;
+        updateColor = g_app.updateState == UpdateState::Error
+                          ? g_app.palette.danger
+                          : (g_app.updateState == UpdateState::Available ? g_app.palette.accent
+                                                                         : g_app.palette.secondary);
+    }
+    SetBrushColor(g_app.brush.Get(), updateColor);
+    DrawTextEx(rt, g_app.dwrite.Get(), updateText, g_app.fonts.chipSmall.Get(),
+               D2D1::RectF(24.0f, 440.0f, 376.0f, 458.0f), g_app.brush.Get(),
+               TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.secondary);
     DrawTextEx(rt, g_app.dwrite.Get(), L"图像与扫描结果仅在本机内存中处理，不作保存。",
-               g_app.fonts.footer.Get(), D2D1::RectF(24.0f, 454.0f, 376.0f, 472.0f),
+               g_app.fonts.footer.Get(), D2D1::RectF(24.0f, 466.0f, 376.0f, 482.0f),
                g_app.brush.Get(), TextAlign::Leading, true, true);
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.tertiary);
     DrawTextEx(rt, g_app.dwrite.Get(),
-               L"解码：ZXing-C++ + quirc  ·  设置保存在本机，卸载时删除",
-               g_app.fonts.chipSmall.Get(), D2D1::RectF(24.0f, 474.0f, 376.0f, 492.0f),
+               L"MIT License · ZXing-C++ + quirc · 设置卸载时删除",
+               g_app.fonts.chipSmall.Get(), D2D1::RectF(24.0f, 484.0f, 376.0f, 500.0f),
                g_app.brush.Get(), TextAlign::Leading, true, true);
 }
 
 void PaintMainWindow(HWND hwnd) {
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+        PAINTSTRUCT hiddenPaint{};
+        BeginPaint(hwnd, &hiddenPaint);
+        EndPaint(hwnd, &hiddenPaint);
+        return;
+    }
+
     EnsureRenderTarget(hwnd);
-    if (!g_app.rt) return;
+    if (!g_app.rt) {
+        static bool errorShown = false;
+        if (!errorShown) {
+            errorShown = true;
+            MessageBoxW(hwnd, L"无法初始化图形渲染，EasyQR 将退出。", EASYQR_APP_NAME,
+                        MB_ICONERROR | MB_OK);
+            PostMessageW(hwnd, kQuitForInstallerMessage, 0, 0);
+        }
+        return;
+    }
 
     PAINTSTRUCT ps{};
     BeginPaint(hwnd, &ps);
-    ID2D1HwndRenderTarget* rt = g_app.rt.Get();
+    ID2D1RenderTarget* rt = g_app.rt.Get();
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    rt->Clear(g_app.palette.page);
+    if (g_app.micaEnabled) {
+        rt->Clear(D2D1::ColorF(0, 0.0f));
+        SetBrushColor(g_app.brush.Get(), g_app.palette.page);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        rt->FillRectangle(
+            D2D1::RectF(0.0f, 0.0f, static_cast<float>(client.right),
+                        static_cast<float>(client.bottom)),
+            g_app.brush.Get());
+    } else {
+        rt->Clear(g_app.palette.page);
+    }
 
+    DrawTitleBar(rt);
     if (g_app.view == MainView::Home) {
         DrawHome(rt);
     } else {
@@ -585,6 +1018,9 @@ void PaintMainWindow(HWND hwnd) {
     }
 
     const HRESULT hr = rt->EndDraw();
+    if (SUCCEEDED(hr) && g_app.compositionMode && g_app.swapChain) {
+        g_app.swapChain->Present(1, 0);
+    }
     EndPaint(hwnd, &ps);
 
     if (hr == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) {
@@ -622,8 +1058,20 @@ void ActivateControl(int control) {
         SwitchView(MainView::Settings);
         return;
     }
+    if (control == kMinimize) {
+        if (g_app.hwnd) ShowWindow(g_app.hwnd, SW_MINIMIZE);
+        return;
+    }
+    if (control == kClose) {
+        if (g_app.hwnd) PostMessageW(g_app.hwnd, WM_CLOSE, 0, 0);
+        return;
+    }
     if (control == kBack) {
         SwitchView(MainView::Home);
+        return;
+    }
+    if (control == kUpdateButton) {
+        BeginUpdateAction(g_app.hwnd);
         return;
     }
     if (control >= kThemeSystem && control <= kThemeDark) {
@@ -714,10 +1162,11 @@ void UpdateTrayPresence(HWND hwnd) {
 void ShowMainFromTray(HWND hwnd) {
     if (!hwnd) return;
     g_app.launchedHidden = false;
-    ShowWindow(hwnd, SW_SHOW);
+    ShowWindow(hwnd, SW_RESTORE);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
     InvalidateRect(hwnd, nullptr, FALSE);
+    UpdateWindow(hwnd);
     UpdateTrayPresence(hwnd);
 }
 
@@ -729,6 +1178,7 @@ void HideToTray(HWND hwnd) {
         return;
     }
     ShowWindow(hwnd, SW_HIDE);
+    DiscardRenderTarget();
     UpdateTrayPresence(hwnd);
     if (!g_app.trayBalloonShown) {
         g_app.trayBalloonShown = true;
@@ -908,6 +1358,105 @@ void ToggleAutoStart() {
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
+void JoinUpdateThread() {
+    if (g_app.updateThread.joinable()) g_app.updateThread.join();
+}
+
+void StartUpdateCheck(HWND hwnd) {
+    JoinUpdateThread();
+    g_app.updateState = UpdateState::Checking;
+    g_app.updateMessage = L"正在从 GitHub 检查更新…";
+    g_app.updateVersion.clear();
+    g_app.updateTag.clear();
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+    g_app.updateThread = std::thread([] {
+        auto* result = new UpdateCheckResult(CheckForUpdate(EASYQR_VERSION_STRING));
+        if (g_app.hwnd) {
+            PostMessageW(g_app.hwnd, kUpdateCheckDoneMessage, 0,
+                         reinterpret_cast<LPARAM>(result));
+        } else {
+            delete result;
+        }
+    });
+}
+
+void StartUpdateDownload(HWND hwnd) {
+    if (g_app.updateVersion.empty() || g_app.updateTag.empty()) return;
+    JoinUpdateThread();
+    const std::wstring version = g_app.updateVersion;
+    const std::wstring tag = g_app.updateTag;
+    g_app.updateState = UpdateState::Downloading;
+    g_app.updateMessage = L"正在下载更新，请稍候…";
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+    g_app.updateThread = std::thread([version, tag] {
+        auto* result = new UpdatePrepareResult(PrepareUpdate(version, tag));
+        if (g_app.hwnd) {
+            PostMessageW(g_app.hwnd, kUpdateReadyMessage, 0, reinterpret_cast<LPARAM>(result));
+        } else {
+            delete result;
+        }
+    });
+}
+
+void BeginUpdateAction(HWND hwnd) {
+    if (g_app.updateState == UpdateState::Checking ||
+        g_app.updateState == UpdateState::Downloading) {
+        return;
+    }
+    if (g_app.updateState == UpdateState::Available) {
+        StartUpdateDownload(hwnd);
+    } else {
+        StartUpdateCheck(hwnd);
+    }
+}
+
+void HandleUpdateCheckResult(HWND hwnd, UpdateCheckResult* result) {
+    JoinUpdateThread();
+    std::unique_ptr<UpdateCheckResult> holder(result);
+    if (!result) return;
+    if (!result->ok) {
+        g_app.updateState = UpdateState::Error;
+        g_app.updateMessage = result->error;
+    } else if (result->available) {
+        g_app.updateState = UpdateState::Available;
+        g_app.updateVersion = result->version;
+        g_app.updateTag = result->tag;
+        g_app.updateMessage = L"发现新版本 v" + result->version + L"，点击按钮自动更新";
+    } else {
+        g_app.updateState = UpdateState::UpToDate;
+        g_app.updateMessage = L"已是最新版本";
+        g_app.updateVersion.clear();
+        g_app.updateTag.clear();
+    }
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void HandleUpdateReadyResult(HWND hwnd, UpdatePrepareResult* result) {
+    JoinUpdateThread();
+    std::unique_ptr<UpdatePrepareResult> holder(result);
+    if (!result) return;
+    if (!result->ok) {
+        g_app.updateState = UpdateState::Error;
+        g_app.updateMessage = result->error;
+        if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+
+    std::wstring error;
+    if (result->installer) {
+        if (StartInstaller(result->filePath, &error)) {
+            QuitApplication(hwnd);
+            return;
+        }
+    } else if (ApplyPortableUpdate(result->filePath, &error)) {
+        QuitApplication(hwnd);
+        return;
+    }
+    g_app.updateState = UpdateState::Error;
+    g_app.updateMessage = error;
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void ShowTrayMenu(HWND hwnd) {
     if (!hwnd) return;
     g_app.autoStart = IsAutoStartEnabled();
@@ -994,6 +1543,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         case kShowMainMessage:
             ShowMainFromTray(hwnd);
             return 0;
+        case kUpdateCheckDoneMessage:
+            HandleUpdateCheckResult(hwnd, reinterpret_cast<UpdateCheckResult*>(lParam));
+            return 0;
+        case kUpdateReadyMessage:
+            HandleUpdateReadyResult(hwnd, reinterpret_cast<UpdatePrepareResult*>(lParam));
+            return 0;
         case kQuitForInstallerMessage:
             g_app.quitting = true;
             g_app.hotkeyCapture = AppState::HotkeyCapture::None;
@@ -1020,12 +1575,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             PaintMainWindow(hwnd);
             return 0;
         case WM_SIZE: {
+            if (wParam == SIZE_MINIMIZED) {
+                DiscardRenderTarget();
+                return 0;
+            }
             if (g_app.rt) {
                 RECT client{};
                 GetClientRect(hwnd, &client);
-                g_app.rt->Resize(D2D1::SizeU(
+                ResizeRenderTarget(
                     static_cast<UINT>(std::max<LONG>(1, client.right - client.left)),
-                    static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top))));
+                    static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top)));
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -1034,19 +1593,45 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             const UINT newDpi = HIWORD(wParam);
             g_app.dpi = newDpi ? newDpi : 96;
             RECT* suggested = reinterpret_cast<RECT*>(lParam);
-            RECT client{0, 0, MulDiv(static_cast<int>(kClientWidth), g_app.dpi, 96),
-                        MulDiv(static_cast<int>(ClientHeightForView()), g_app.dpi, 96)};
-            const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
-            const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
-            AdjustWindowRectExForDpi(&client, style, FALSE, exStyle, g_app.dpi);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, client.right - client.left,
-                         client.bottom - client.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            const int width = MulDiv(static_cast<int>(kClientWidth), g_app.dpi, 96);
+            const int height = MulDiv(static_cast<int>(ClientHeightForView()), g_app.dpi, 96);
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, width, height,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
             if (g_app.rt) {
                 g_app.rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
+                if (g_app.compositionMode && g_app.d2dContext) {
+                    g_app.d2dContext->SetDpi(static_cast<float>(g_app.dpi),
+                                             static_cast<float>(g_app.dpi));
+                    RECT client{};
+                    GetClientRect(hwnd, &client);
+                    ResizeRenderTarget(static_cast<UINT>(client.right),
+                                       static_cast<UINT>(client.bottom));
+                }
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        case WM_NCCALCSIZE:
+            return 0;
+        case WM_NCACTIVATE:
+            return TRUE;
+        case WM_NCHITTEST: {
+            POINT cursor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ScreenToClient(hwnd, &cursor);
+            const float scale = static_cast<float>(g_app.dpi) / 96.0f;
+            const float x = static_cast<float>(cursor.x) / scale;
+            const float y = static_cast<float>(cursor.y) / scale;
+            if (ControlAt(x, y) >= 0) return HTCLIENT;
+            return HTCAPTION;
+        }
+        case WM_NCMOUSEMOVE:
+            if (g_app.hoverControl != kControlNone) {
+                g_app.hoverControl = kControlNone;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        case WM_NCPAINT:
+            return 0;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             if (message == WM_THEMECHANGED ||
@@ -1068,7 +1653,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             track.dwFlags = TME_LEAVE;
             track.hwndTrack = hwnd;
             TrackMouseEvent(&track);
-            SetCursor(LoadCursorW(nullptr, control >= 0 ? IDC_HAND : IDC_ARROW));
+            SetCursor(LoadCursorW(nullptr, UsesHandCursor(control) ? IDC_HAND : IDC_ARROW));
             return 0;
         }
         case WM_MOUSELEAVE:
@@ -1117,7 +1702,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             return 0;
         case WM_SETCURSOR:
             if (LOWORD(lParam) == HTCLIENT) {
-                SetCursor(LoadCursorW(nullptr, g_app.hoverControl >= 0 ? IDC_HAND : IDC_ARROW));
+                SetCursor(LoadCursorW(nullptr,
+                                      UsesHandCursor(g_app.hoverControl) ? IDC_HAND : IDC_ARROW));
                 return TRUE;
             }
             break;
@@ -1206,6 +1792,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             UnregisterConfiguredHotkeys();
             RemoveTrayIcon();
             DestroyOverlayForExit();
+            JoinUpdateThread();
             g_app.hwnd = nullptr;
             DiscardRenderTarget();
             PostQuitMessage(0);
@@ -1227,11 +1814,13 @@ void SetStatus(std::wstring text, AppState::StatusKind kind) {
 void ApplyWindowTheme(HWND hwnd, bool dark) {
     if (!hwnd) return;
     const BOOL useDark = dark ? TRUE : FALSE;
-    SetDwmAttribute(hwnd, 20, &useDark, sizeof(useDark));    // DWMWA_USE_IMMERSIVE_DARK_MODE
-    int backdrop = 2;                                        // DWMSBT_MAINWINDOW (Mica)
-    SetDwmAttribute(hwnd, 38, &backdrop, sizeof(backdrop));  // DWMWA_SYSTEMBACKDROP_TYPE
-    int corner = 2;                                          // DWMWCP_ROUND
-    SetDwmAttribute(hwnd, 33, &corner, sizeof(corner));      // DWMWA_WINDOW_CORNER_PREFERENCE
+    SetDwmAttribute(hwnd, 20, &useDark, sizeof(useDark));  // DWMWA_USE_IMMERSIVE_DARK_MODE
+    if (g_app.compositionMode) {
+        int backdrop = 2;  // DWMSBT_MAINWINDOW (Mica)
+        SetDwmAttribute(hwnd, 38, &backdrop, sizeof(backdrop));
+    }
+    int corner = 2;  // DWMWCP_ROUND
+    SetDwmAttribute(hwnd, 33, &corner, sizeof(corner));
 }
 
 void RefreshTheme() {
@@ -1239,7 +1828,7 @@ void RefreshTheme() {
     if (g_app.themeMode != ThemeMode::System) return;
 
     g_app.dark = g_app.systemDark;
-    g_app.palette = MakePalette(g_app.dark);
+    UpdatePalette();
     ApplyWindowTheme(g_app.hwnd, g_app.dark);
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
@@ -1249,7 +1838,7 @@ void SetThemeMode(ThemeMode mode) {
     if (mode == ThemeMode::System) g_app.systemDark = IsDarkThemePreferred();
     const bool dark = mode == ThemeMode::System ? g_app.systemDark : mode == ThemeMode::Dark;
     g_app.dark = dark;
-    g_app.palette = MakePalette(dark);
+    UpdatePalette();
     SaveThemeMode(mode);
     ApplyWindowTheme(g_app.hwnd, dark);
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
@@ -1260,32 +1849,59 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     bool launchedHidden = false;
+    bool updatedLaunch = false;
     int argumentCount = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
     if (arguments) {
         for (int i = 1; i < argumentCount; ++i) {
-            if (_wcsicmp(arguments[i], L"--tray") == 0) {
-                launchedHidden = true;
-                break;
-            }
+            if (_wcsicmp(arguments[i], L"--tray") == 0) launchedHidden = true;
+            if (_wcsicmp(arguments[i], L"--updated") == 0) updatedLaunch = true;
         }
         LocalFree(arguments);
     }
 
+    std::vector<wchar_t> executablePath(MAX_PATH);
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, executablePath.data(),
+                                                static_cast<DWORD>(executablePath.size()));
+        if (length == 0) break;
+        if (length < executablePath.size() - 1) {
+            executablePath.resize(length);
+            break;
+        }
+        executablePath.resize(executablePath.size() * 2);
+    }
     struct MutexGuard {
         HANDLE handle = nullptr;
         ~MutexGuard() {
             if (handle) CloseHandle(handle);
         }
     } singleInstance;
-    singleInstance.handle = CreateMutexW(nullptr, FALSE, L"Local\\EasyQR.SingleInstance");
-    if (singleInstance.handle && GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND existing = FindWindowW(EASYQR_MAIN_CLASS, nullptr);
-        if (existing && !launchedHidden) {
-            PostMessageW(existing, kShowMainMessage, 0, 0);
+    bool acquired = false;
+    const int attempts = updatedLaunch ? 50 : 1;
+    for (int attempt = 0; attempt < attempts && !acquired; ++attempt) {
+        singleInstance.handle = CreateMutexW(nullptr, FALSE, L"Local\\EasyQR.SingleInstance");
+        if (!singleInstance.handle) break;
+        if (GetLastError() != ERROR_ALREADY_EXISTS) {
+            acquired = true;
+            break;
         }
+        CloseHandle(singleInstance.handle);
+        singleInstance.handle = nullptr;
+        if (attempt + 1 < attempts) Sleep(100);
+    }
+    if (!acquired) {
+        HWND existing = FindWindowW(EASYQR_MAIN_CLASS, nullptr);
+        if (existing && !launchedHidden) PostMessageW(existing, kShowMainMessage, 0, 0);
         return 0;
     }
+
+    if (!executablePath.empty()) {
+        std::wstring oldExecutable(executablePath.begin(), executablePath.end());
+        oldExecutable += L".old";
+        DeleteFileW(oldExecutable.c_str());
+    }
+    CleanupUpdateCache();
 
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(com)) {
@@ -1329,7 +1945,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     g_app.launchedHidden = launchedHidden;
     g_app.dark = g_app.themeMode == ThemeMode::System ? g_app.systemDark
                                                       : g_app.themeMode == ThemeMode::Dark;
-    g_app.palette = MakePalette(g_app.dark);
+    g_app.compositionMode = ShouldUseComposition();
+    UpdatePalette();
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -1352,19 +1969,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     }
 
     const UINT systemDpi = GetDpiForSystem();
-    RECT windowRect{0, 0, MulDiv(static_cast<int>(kClientWidth), systemDpi, 96),
-                    MulDiv(static_cast<int>(ClientHeightForView()), systemDpi, 96)};
+    const int windowWidth = MulDiv(static_cast<int>(kClientWidth), systemDpi, 96);
+    const int windowHeight = MulDiv(static_cast<int>(ClientHeightForView()), systemDpi, 96);
     const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
-    AdjustWindowRectExForDpi(&windowRect, style, FALSE, WS_EX_APPWINDOW, systemDpi);
-    const int windowWidth = windowRect.right - windowRect.left;
-    const int windowHeight = windowRect.bottom - windowRect.top;
+    DWORD exStyle = WS_EX_APPWINDOW;
+    if (g_app.compositionMode) exStyle |= WS_EX_NOREDIRECTIONBITMAP;
 
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     const int windowX = work.left + ((work.right - work.left) - windowWidth) / 2;
     const int windowY = work.top + ((work.bottom - work.top) - windowHeight) / 2;
 
-    HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, EASYQR_MAIN_CLASS, EASYQR_APP_NAME, style, windowX,
+    HWND hwnd = CreateWindowExW(exStyle, EASYQR_MAIN_CLASS, EASYQR_APP_NAME, style, windowX,
                                windowY, windowWidth, windowHeight, nullptr, nullptr, instance,
                                nullptr);
     if (!hwnd) {

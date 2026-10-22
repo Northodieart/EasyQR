@@ -228,14 +228,57 @@ void DrawIcon(ID2D1RenderTarget* target, IconId icon, const D2D1_RECT_F& rect,
             line(12.0f, 7.2f, 12.0f, 13.0f);
             dot(12.0f, 16.7f, 0.95f);
             break;
-        case IconId::Settings:
-            line(3.4f, 7.0f, 20.6f, 7.0f);
-            line(3.4f, 12.0f, 20.6f, 12.0f);
-            line(3.4f, 17.0f, 20.6f, 17.0f);
-            dot(8.0f, 7.0f, 2.2f);
-            dot(16.2f, 12.0f, 2.2f);
-            dot(10.8f, 17.0f, 2.2f);
+        case IconId::Settings: {
+            constexpr float kPi = 3.14159265358979323846f;
+            ComPtr<ID2D1Factory> factory;
+            target->GetFactory(factory.Put());
+            ComPtr<ID2D1PathGeometry> gear;
+            bool drewGear = false;
+            if (factory && SUCCEEDED(factory->CreatePathGeometry(gear.Put())) && gear) {
+                ComPtr<ID2D1GeometrySink> sink;
+                if (SUCCEEDED(gear->Open(sink.Put())) && sink) {
+                    auto point = [&](float angle, float radius) {
+                        return Pt(rect, 12.0f + std::cos(angle) * radius,
+                                  12.0f + std::sin(angle) * radius, unit);
+                    };
+                    sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
+                    sink->BeginFigure(point(-0.26f, 6.1f), D2D1_FIGURE_BEGIN_FILLED);
+                    for (int i = 0; i < 8; ++i) {
+                        const float center = kPi * 0.25f * static_cast<float>(i);
+                        const float bodyRadius = 6.1f;
+                        const float toothRadius = 9.4f;
+                        sink->AddLine(point(center - 0.26f, bodyRadius));
+                        sink->AddLine(point(center - 0.14f, toothRadius));
+                        sink->AddLine(point(center + 0.14f, toothRadius));
+                        sink->AddLine(point(center + 0.26f, bodyRadius));
+                    }
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+
+                    sink->BeginFigure(point(0.0f, 2.6f), D2D1_FIGURE_BEGIN_FILLED);
+                    for (int i = 1; i <= 16; ++i) {
+                        const float angle = kPi * 2.0f * static_cast<float>(i) / 16.0f;
+                        sink->AddLine(point(angle, 2.6f));
+                    }
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink->Close();
+                    target->FillGeometry(gear.Get(), brush);
+                    drewGear = true;
+                }
+            }
+            if (!drewGear) {
+                for (int i = 0; i < 8; ++i) {
+                    const float angle = kPi * 0.25f * static_cast<float>(i);
+                    const float c = std::cos(angle);
+                    const float s = std::sin(angle);
+                    line(12.0f + c * 6.9f, 12.0f + s * 6.9f,
+                         12.0f + c * 9.6f, 12.0f + s * 9.6f);
+                }
+                target->DrawEllipse(D2D1::Ellipse(Pt(rect, 12.0f, 12.0f, unit), 6.9f * unit,
+                                                  6.9f * unit),
+                                    brush, sw, style);
+            }
             break;
+        }
         case IconId::ArrowLeft:
             line(19.0f, 12.0f, 6.0f, 12.0f);
             line(11.0f, 6.5f, 5.5f, 12.0f);

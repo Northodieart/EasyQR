@@ -20,13 +20,15 @@ OutFile "${OUTPUT}"
 !endif
 
 !define APP_NAME "EasyQR"
-!define APP_VERSION "1.3.0"
+!define APP_VERSION "1.4.0"
 !define PUBLISHER "Northodieart"
 !define MAIN_CLASS "EasyQR.MainWindow"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\EasyQR"
 !define PRODUCT_KEY "Software\EasyQR"
 
-VIProductVersion "1.3.0.0"
+Var UpdateMode
+
+VIProductVersion "1.4.0.0"
 VIAddVersionKey "ProductName" "EasyQR"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey "FileDescription" "EasyQR 屏幕二维码识别安装程序"
@@ -66,29 +68,60 @@ InstallDirRegKey HKLM "${PRODUCT_KEY}" "InstallDir"
 
 Function .onInit
     SetRegView 64
-    ${IfNot} ${RunningX64}
-        MessageBox MB_ICONSTOP "EasyQR 仅支持 64 位 Windows 10 / Windows 11。" /SD IDOK
-        Abort
+    StrCpy $UpdateMode "0"
+    ${GetParameters} $R0
+    ${GetOptions} $R0 "/EASYQRUPDATE" $R1
+    ${IfNot} ${Errors}
+        StrCpy $UpdateMode "1"
+        ReadRegStr $0 HKLM "${PRODUCT_KEY}" "InstallDir"
+        ${If} $0 != ""
+            StrCpy $INSTDIR $0
+        ${EndIf}
     ${EndIf}
-    !ifndef SKIP_OS_CHECK
-    ${IfNot} ${AtLeastWin10}
-        MessageBox MB_ICONSTOP "EasyQR 需要 Windows 10 或更高版本。" /SD IDOK
-        Abort
-    ${EndIf}
-    !endif
 
-    FindWindow $0 "${MAIN_CLASS}" ""
-    StrCmp $0 0 install_init_done
-    MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON1 \
-        "EasyQR 正在运行。安装前需要关闭它，是否现在关闭？" IDNO install_init_abort
-    SendMessage $0 0x8016 0 0 ; EasyQR quit-for-installer message
-    Sleep 800
-    FindWindow $0 "${MAIN_CLASS}" ""
-    StrCmp $0 0 install_init_done
-    MessageBox MB_ICONSTOP "无法关闭正在运行的 EasyQR，请退出后重试。" /SD IDOK
+    ${If} $UpdateMode != "1"
+        ${IfNot} ${RunningX64}
+            MessageBox MB_ICONSTOP "EasyQR 仅支持 64 位 Windows 10 / Windows 11。" /SD IDOK
+            Abort
+        ${EndIf}
+        !ifndef SKIP_OS_CHECK
+        ${IfNot} ${AtLeastWin10}
+            MessageBox MB_ICONSTOP "EasyQR 需要 Windows 10 或更高版本。" /SD IDOK
+            Abort
+        ${EndIf}
+        !endif
+    ${EndIf}
+
+    ${If} $UpdateMode == "1"
+        StrCpy $R1 0
+        update_close_loop:
+            FindWindow $0 "${MAIN_CLASS}" ""
+            StrCmp $0 0 install_init_done
+            SendMessage $0 0x8016 0 0
+            Sleep 300
+            IntOp $R1 $R1 + 1
+            IntCmp $R1 15 install_init_abort update_close_loop install_init_abort
+    ${Else}
+        FindWindow $0 "${MAIN_CLASS}" ""
+        StrCmp $0 0 install_init_done
+        MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON1 \
+            "EasyQR 正在运行。安装前需要关闭它，是否现在关闭？" IDNO install_init_abort
+        SendMessage $0 0x8016 0 0
+        Sleep 800
+        FindWindow $0 "${MAIN_CLASS}" ""
+        StrCmp $0 0 install_init_done
+        MessageBox MB_ICONSTOP "无法关闭正在运行的 EasyQR，请退出后重试。" /SD IDOK
+    ${EndIf}
+
 install_init_abort:
     Abort
 install_init_done:
+FunctionEnd
+
+Function .onInstSuccess
+    ${If} $UpdateMode == "1"
+        Exec '"$INSTDIR\EasyQR.exe"'
+    ${EndIf}
 FunctionEnd
 
 Section "EasyQR（必需）" SecCore
@@ -126,7 +159,10 @@ SectionEnd
 
 Section "创建桌面快捷方式" SecDesktop
     SetShellVarContext all
-    CreateShortCut "$DESKTOP\EasyQR.lnk" "$INSTDIR\EasyQR.exe" "" "$INSTDIR\EasyQR.exe" 0
+    ${If} $UpdateMode != "1"
+    ${OrIf} ${FileExists} "$DESKTOP\EasyQR.lnk"
+        CreateShortCut "$DESKTOP\EasyQR.lnk" "$INSTDIR\EasyQR.exe" "" "$INSTDIR\EasyQR.exe" 0
+    ${EndIf}
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
@@ -170,8 +206,9 @@ Section "Uninstall"
     DeleteRegKey HKCU "${PRODUCT_KEY}"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "EasyQR"
 
-    ; The app itself never writes to these locations. Cleanup is defense in depth.
+    ; The app itself never writes scan data to these locations. Cleanup is defense in depth.
     SetShellVarContext current
     RMDir /r "$APPDATA\EasyQR"
     RMDir /r "$LOCALAPPDATA\EasyQR"
+    RMDir /r "$TEMP\EasyQR"
 SectionEnd

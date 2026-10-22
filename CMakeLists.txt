@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(EasyQR VERSION 1.3.0 LANGUAGES C CXX)
+project(EasyQR VERSION 1.4.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "EasyQR targets Windows x64. Configure with -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw64.cmake")
@@ -36,6 +36,7 @@ add_executable(EasyQR WIN32
     src/url.cpp
     src/util.cpp
     src/settings.cpp
+    src/update.cpp
     src/resources.rc
     vendor/quirc/quirc.c
     vendor/quirc/decode.c
@@ -78,6 +79,10 @@ target_link_libraries(EasyQR PRIVATE
     d2d1
     dwrite
     dwmapi
+    d3d11
+    dxgi
+    dcomp
+    winhttp
     shell32
     user32
     gdi32
