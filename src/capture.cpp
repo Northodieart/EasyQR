@@ -21,7 +21,7 @@ std::wstring LastErrorText(const wchar_t* prefix) {
 
 }  // namespace
 
-bool CaptureScreen(ScreenFrame* frame, std::wstring* error) {
+bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray) {
     if (!frame) return false;
 
     ScreenFrame result;
@@ -94,16 +94,17 @@ bool CaptureScreen(ScreenFrame* frame, std::wstring* error) {
     try {
         result.bgra.resize(static_cast<size_t>(pixel_count));
         std::memcpy(result.bgra.data(), bits, static_cast<size_t>(pixel_count) * sizeof(uint32_t));
-        result.gray.resize(static_cast<size_t>(pixel_count));
-
-        const uint32_t* pixels = result.bgra.data();
-        uint8_t* gray = result.gray.data();
-        for (size_t i = 0; i < result.bgra.size(); ++i) {
-            const uint32_t pixel = pixels[i];
-            const uint32_t b = pixel & 0xffu;
-            const uint32_t g = (pixel >> 8) & 0xffu;
-            const uint32_t r = (pixel >> 16) & 0xffu;
-            gray[i] = static_cast<uint8_t>((r * 77u + g * 150u + b * 29u) >> 8);
+        if (includeGray) {
+            result.gray.resize(static_cast<size_t>(pixel_count));
+            const uint32_t* pixels = result.bgra.data();
+            uint8_t* gray = result.gray.data();
+            for (size_t i = 0; i < result.bgra.size(); ++i) {
+                const uint32_t pixel = pixels[i];
+                const uint32_t b = pixel & 0xffu;
+                const uint32_t g = (pixel >> 8) & 0xffu;
+                const uint32_t r = (pixel >> 16) & 0xffu;
+                gray[i] = static_cast<uint8_t>((r * 77u + g * 150u + b * 29u) >> 8);
+            }
         }
     } catch (const std::bad_alloc&) {
         if (error) *error = L"内存不足，无法保存屏幕快照。";

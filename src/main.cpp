@@ -13,6 +13,8 @@
 
 AppState g_app;
 
+void RefreshMainBackdropForDrag(HWND hwnd);
+
 namespace {
 
 constexpr float kClientWidth = 400.0f;
@@ -29,6 +31,8 @@ constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
 constexpr UINT_PTR kViewAnimationTimer = 2;
 constexpr UINT kViewAnimationDurationMs = 200;
+constexpr DWORD kDwmaCloak = 13;  // DWMWA_CLOAK
+constexpr int kMainGlassFactor = 20;
 
 enum TrayCommand : UINT {
     kTrayOpen = 1,
@@ -1956,6 +1960,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
+        case WM_ENTERSIZEMOVE:
+            RefreshMainBackdropForDrag(hwnd);
+            break;
         case WM_MOVE:
             if (g_app.translucent && g_app.glassAvailable) {
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -2144,6 +2151,34 @@ void SetStatus(std::wstring text, AppState::StatusKind kind) {
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
+bool CaptureMainBackdropNow() {
+    ScreenFrame frame;
+    std::wstring error;
+    std::vector<uint32_t> pixels;
+    int width = 0;
+    int height = 0;
+    if (!CaptureScreen(&frame, &error, false) ||
+        !BuildGlassImage(frame, kMainGlassFactor, &pixels, &width, &height)) {
+        return false;
+    }
+
+    g_app.glassPixels = std::move(pixels);
+    g_app.glassWidth = width;
+    g_app.glassHeight = height;
+    g_app.glassScreenX = frame.x;
+    g_app.glassScreenY = frame.y;
+    g_app.glassScreenWidth = frame.width;
+    g_app.glassScreenHeight = frame.height;
+    g_app.glassAvailable = true;
+    g_app.glassBitmap.Reset();
+    if (g_app.rt) {
+        CreateGlassBitmap();
+    } else {
+        UpdatePalette();
+    }
+    return true;
+}
+
 void RefreshMainBackdrop() {
     if (!g_app.hwnd) return;
     if (!g_app.translucent) {
@@ -2154,16 +2189,8 @@ void RefreshMainBackdrop() {
     }
     if (IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd)) return;
 
-    ScreenFrame frame;
-    std::wstring error;
-    std::vector<uint32_t> pixels;
-    int width = 0;
-    int height = 0;
-    const bool captured = CaptureScreen(&frame, &error) &&
-                          BuildGlassImage(frame, 20, &pixels, &width, &height);
-
     g_app.glassBitmap.Reset();
-    if (!captured) {
+    if (!CaptureMainBackdropNow()) {
         g_app.glassPixels.clear();
         g_app.glassWidth = 0;
         g_app.glassHeight = 0;
@@ -2175,21 +2202,24 @@ void RefreshMainBackdrop() {
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
-
-    g_app.glassPixels = std::move(pixels);
-    g_app.glassWidth = width;
-    g_app.glassHeight = height;
-    g_app.glassScreenX = frame.x;
-    g_app.glassScreenY = frame.y;
-    g_app.glassScreenWidth = frame.width;
-    g_app.glassScreenHeight = frame.height;
-    g_app.glassAvailable = true;
-    if (g_app.rt) {
-        CreateGlassBitmap();
-    } else {
-        UpdatePalette();
-    }
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
+}
+
+void RefreshMainBackdropForDrag(HWND hwnd) {
+    if (!hwnd || !g_app.translucent) return;
+
+    // Hide the window from one composition so the capture contains the current
+    // desktop behind it rather than a snapshot of our own glass surface.
+    BOOL cloak = TRUE;
+    if (FAILED(DwmSetWindowAttribute(hwnd, kDwmaCloak, &cloak, sizeof(cloak)))) return;
+    DwmFlush();
+    const bool refreshed = CaptureMainBackdropNow();
+    if (refreshed) {
+        InvalidateRect(hwnd, nullptr, FALSE);
+        UpdateWindow(hwnd);
+    }
+    cloak = FALSE;
+    DwmSetWindowAttribute(hwnd, kDwmaCloak, &cloak, sizeof(cloak));
 }
 
 void ApplyWindowTheme(HWND hwnd, bool dark) {

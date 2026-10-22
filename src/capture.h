@@ -14,4 +14,4 @@ struct ScreenFrame {
 };
 
 // Captures the whole virtual desktop into memory. Never writes a file.
-bool CaptureScreen(ScreenFrame* frame, std::wstring* error);
+bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray = true);
