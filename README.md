@@ -39,7 +39,7 @@ EasyQR 是一个面向 **Windows 11 x64** 的轻量屏幕二维码 / 条码识�
 - **静态模糊**：玻璃背景在窗口显示、从托盘恢复、扫描结束和按住开始拖动时采样，并复用低分辨率模糊纹理；拖动过程中只按新位置取用该纹理，不持续抓屏，也没有轮询计时器。拖动开始时通过 `WDA_EXCLUDEFROMCAPTURE` 把窗口从截屏中排除（窗口本身保持可见，不会闪烁），因此取到的是窗口背后的当前桌面，而不是上次残留的旧背景。
 - **动态模糊**：交给 DWM 合成器实时处理，程序本身不抓屏、不跑 60 fps 定时器；性能与系统开始菜单的 Acrylic 一致，只在系统合成阶段产生开销。
 - **无模糊**：不进行任何背景采样或模糊绘制，适合老设备。
-- 无模糊与静态模糊使用普通窗口渲染目标，不创建 Direct3D / DirectComposition 设备；只有动态模糊需要系统 Acrylic 时才启用合成渲染，切换档位时自动重建对应渲染路径。
+- 所有模糊档位共用同一个 Direct2D 窗口渲染目标，不创建额外的 Direct3D / DirectComposition 设备；动态模糊直接由 DWM 合成器在系统合成阶段完成，程序侧没有 60 fps 采样循环。
 - 界面只在交互、主题变化或窗口重绘时刷新；静态模式在拖动和展开动画期间复用已生成的纹理。
 - 隐藏到托盘或最小化时释放 Direct3D / DirectComposition / Direct2D 资源，重新显示时按需创建。
 - GitHub 更新检查只在点击按钮时联网，不在后台轮询。
@@ -131,8 +131,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.4.6-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.4.6-x64-setup.exe` | 安装版 |
+| `EasyQR-1.4.7-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.4.7-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -166,7 +166,7 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 ```bash
 sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 ./tests/run_tests.sh     # 原生 URL / 码制解码回归测试
-./scripts/build.sh       # 生成 v1.4.6 便携版与安装版
+./scripts/build.sh       # 生成 v1.4.7 便携版与安装版
 ```
 
 ### 发布新版本
@@ -174,8 +174,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.4.6
-git push origin v1.4.6
+git tag v1.4.7
+git push origin v1.4.7
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -220,6 +220,12 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.4.7
+
+- 真正修复动态模糊：1.4.6 只移除了 `WS_EX_NOREDIRECTIONBITMAP`，但 DirectComposition 图层盖在不透明的窗口表面上，系统 Acrylic 仍被遮挡（切换后旧静态帧残留、重启后显示纯色）。现在改为预乘 Alpha 的窗口渲染目标，让窗口自身表面透明，DWM Acrylic 直接透出来；同时移除了整套 D3D11 / DXGI / DirectComposition 渲染路径，所有档位共用同一套低功耗渲染。
+- 修复切到动态模糊后静态模糊仍显示选中的问题（残留旧帧造成的假象）。
+- 静态模糊开始拖动时不再卡顿：背景重采样移到工作线程异步完成，采样期间用 `WDA_EXCLUDEFROMCAPTURE` 排除窗口，拖动立即响应，采样完成后自动应用新背景。
 
 ### 1.4.6
 

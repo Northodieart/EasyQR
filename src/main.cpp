@@ -16,6 +16,17 @@ AppState g_app;
 void RefreshMainBackdropForDrag(HWND hwnd);
 bool CaptureMainBackdropNow();
 
+struct DragCaptureResult {
+    ScreenFrame frame{};
+    std::vector<uint32_t> pixels;
+    int width = 0;
+    int height = 0;
+    bool ok = false;
+};
+
+void ApplyGlassCapture(const ScreenFrame& frame, std::vector<uint32_t>&& pixels, int width,
+                       int height);
+
 namespace {
 
 constexpr float kClientWidth = 400.0f;
@@ -28,6 +39,8 @@ constexpr UINT kShowMainMessage = WM_APP + 21;
 constexpr UINT kQuitForInstallerMessage = WM_APP + 22;
 constexpr UINT kUpdateCheckDoneMessage = WM_APP + 30;
 constexpr UINT kUpdateReadyMessage = WM_APP + 31;
+constexpr UINT kDragCaptureDoneMessage = WM_APP + 32;
+
 constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
 constexpr UINT_PTR kViewAnimationTimer = 2;
@@ -132,37 +145,6 @@ void SetDwmAttribute(HWND hwnd, DWORD attribute, const void* value, DWORD size) 
     if (hwnd) DwmSetWindowAttribute(hwnd, attribute, value, size);
 }
 
-struct OsVersionInfo {
-    ULONG size;
-    ULONG major;
-    ULONG minor;
-    ULONG build;
-    ULONG platform;
-    wchar_t servicePack[128];
-};
-
-bool IsWindows11OrGreater() {
-    using RtlGetVersionFn = LONG(WINAPI*)(OsVersionInfo*);
-    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    FARPROC procedure = ntdll ? GetProcAddress(ntdll, "RtlGetVersion") : nullptr;
-    RtlGetVersionFn getVersion = nullptr;
-    std::memcpy(&getVersion, &procedure, sizeof(getVersion));
-    if (!getVersion) return false;
-    OsVersionInfo info{};
-    info.size = sizeof(info);
-    if (getVersion(&info) != 0) return false;
-    return info.major >= 10 && info.build >= 22000;
-}
-
-bool ShouldUseComposition() {
-    // Only the dynamic glass mode needs DirectComposition + a D3D11 swap chain
-    // (system Acrylic needs a transparent composited surface). None/Static draw
-    // an opaque or pre-blurred frame, so the plain HWND render target keeps the
-    // GPU device and compositor node out of the picture and saves power.
-    static const bool supported = IsWindows11OrGreater();
-    return supported && g_app.glassMode == GlassMode::Dynamic;
-}
-
 void UpdatePalette();
 bool CreateGlassBitmap();
 void DiscardRenderTarget();
@@ -176,33 +158,6 @@ bool CreateRenderBrush() {
         return false;
     }
     g_app.brush = std::move(brush);
-    return true;
-}
-
-bool CreateCompositionTargetBitmap() {
-    if (!g_app.d2dContext || !g_app.swapChain) return false;
-    g_app.d2dContext->SetTarget(nullptr);
-    g_app.targetBitmap.Reset();
-
-    ComPtr<IDXGISurface> surface;
-    if (FAILED(g_app.swapChain->GetBuffer(
-            0, __uuidof(IDXGISurface), reinterpret_cast<void**>(surface.Put()))) ||
-        !surface) {
-        return false;
-    }
-
-    D2D1_BITMAP_PROPERTIES1 properties{};
-    properties.pixelFormat =
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
-    properties.dpiX = static_cast<float>(g_app.dpi);
-    properties.dpiY = static_cast<float>(g_app.dpi);
-    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
-    if (FAILED(g_app.d2dContext->CreateBitmapFromDxgiSurface(
-            surface.Get(), &properties, g_app.targetBitmap.Put())) ||
-        !g_app.targetBitmap) {
-        return false;
-    }
-    g_app.d2dContext->SetTarget(g_app.targetBitmap.Get());
     return true;
 }
 
@@ -265,7 +220,7 @@ void DisableSystemBackdrop(HWND hwnd) {
 }
 
 bool EnableDynamicBackdrop(HWND hwnd) {
-    if (!hwnd || !g_app.compositionMode) return false;
+    if (!hwnd) return false;
 
     MARGINS margins{-1, -1, -1, -1};
     DwmExtendFrameIntoClientArea(hwnd, &margins);
@@ -291,7 +246,7 @@ bool EnableDynamicBackdrop(HWND hwnd) {
 }
 
 void EnableStaticBackdropFallback(HWND hwnd) {
-    if (!hwnd || !g_app.compositionMode) return;
+    if (!hwnd) return;
 
     MARGINS margins{-1, -1, -1, -1};
     DwmExtendFrameIntoClientArea(hwnd, &margins);
@@ -310,130 +265,14 @@ void EnableStaticBackdropFallback(HWND hwnd) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
-bool InitializeCompositionRenderer(HWND hwnd, UINT width, UINT height) {
-    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
-                                        D3D_FEATURE_LEVEL_10_0};
-    const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    ComPtr<ID3D11DeviceContext> deviceContext;
-    ComPtr<ID3D11Device> device;
-    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels,
-                                   ARRAYSIZE(levels), D3D11_SDK_VERSION, device.Put(), nullptr,
-                                   deviceContext.Put());
-    if (FAILED(hr)) {
-        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, levels,
-                               ARRAYSIZE(levels), D3D11_SDK_VERSION, device.Put(), nullptr,
-                               deviceContext.Put());
-    }
-    if (FAILED(hr) || !device) return false;
-
-    ComPtr<IDXGIDevice> dxgiDevice;
-    if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice),
-                                      reinterpret_cast<void**>(dxgiDevice.Put()))) ||
-        !dxgiDevice) {
-        return false;
-    }
-
-    ComPtr<IDXGIAdapter> adapter;
-    if (FAILED(dxgiDevice->GetAdapter(adapter.Put())) || !adapter) return false;
-    ComPtr<IDXGIFactory2> dxgiFactory;
-    if (FAILED(adapter->GetParent(__uuidof(IDXGIFactory2),
-                                  reinterpret_cast<void**>(dxgiFactory.Put()))) ||
-        !dxgiFactory) {
-        return false;
-    }
-
-    DXGI_SWAP_CHAIN_DESC1 description{};
-    description.Width = width;
-    description.Height = height;
-    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    description.SampleDesc.Count = 1;
-    description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    description.BufferCount = 2;
-    description.Scaling = DXGI_SCALING_STRETCH;
-    description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-    description.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-
-    ComPtr<IDXGISwapChain1> swapChain;
-    if (FAILED(dxgiFactory->CreateSwapChainForComposition(device.Get(), &description, nullptr,
-                                                          swapChain.Put())) ||
-        !swapChain) {
-        return false;
-    }
-
-    ComPtr<ID2D1Factory1> d2dFactory;
-    if (FAILED(g_app.d2d->QueryInterface(__uuidof(ID2D1Factory1),
-                                         reinterpret_cast<void**>(d2dFactory.Put()))) ||
-        !d2dFactory) {
-        return false;
-    }
-    ComPtr<ID2D1Device> d2dDevice;
-    if (FAILED(d2dFactory->CreateDevice(dxgiDevice.Get(), d2dDevice.Put())) || !d2dDevice) {
-        return false;
-    }
-    ComPtr<ID2D1DeviceContext> context;
-    if (FAILED(d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, context.Put())) ||
-        !context) {
-        return false;
-    }
-
-    ComPtr<IDCompositionDevice> compositionDevice;
-    if (FAILED(DCompositionCreateDevice(dxgiDevice.Get(), __uuidof(IDCompositionDevice),
-                                        reinterpret_cast<void**>(compositionDevice.Put()))) ||
-        !compositionDevice) {
-        return false;
-    }
-    ComPtr<IDCompositionTarget> compositionTarget;
-    if (FAILED(compositionDevice->CreateTargetForHwnd(hwnd, TRUE, compositionTarget.Put())) ||
-        !compositionTarget) {
-        return false;
-    }
-    ComPtr<IDCompositionVisual> compositionVisual;
-    if (FAILED(compositionDevice->CreateVisual(compositionVisual.Put())) || !compositionVisual) {
-        return false;
-    }
-    if (FAILED(compositionVisual->SetContent(swapChain.Get())) ||
-        FAILED(compositionTarget->SetRoot(compositionVisual.Get())) ||
-        FAILED(compositionDevice->Commit())) {
-        return false;
-    }
-
-    g_app.d3dDevice = std::move(device);
-    g_app.swapChain = std::move(swapChain);
-    g_app.compositionDevice = std::move(compositionDevice);
-    g_app.compositionTarget = std::move(compositionTarget);
-    g_app.compositionVisual = std::move(compositionVisual);
-    g_app.d2dContext = context.Get();
-    g_app.rt.Attach(context.Detach());
-    g_app.rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    g_app.rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    g_app.rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    if (!CreateCompositionTargetBitmap() || !CreateRenderBrush()) {
-        g_app.d2dContext = nullptr;
-        g_app.rt.Reset();
-        g_app.swapChain.Reset();
-        g_app.compositionDevice.Reset();
-        g_app.compositionTarget.Reset();
-        g_app.compositionVisual.Reset();
-        g_app.targetBitmap.Reset();
-        g_app.d3dDevice.Reset();
-        return false;
-    }
-
-    g_app.compositionMode = true;
-    CreateGlassBitmap();
-    if (g_app.glassMode == GlassMode::Dynamic) {
-        EnableDynamicBackdrop(hwnd);
-    } else if (GlassEnabled() && !g_app.glassAvailable) {
-        EnableStaticBackdropFallback(hwnd);
-    }
-    UpdatePalette();
-    return true;
-}
-
 bool InitializeHwndRenderer(HWND hwnd, UINT width, UINT height) {
+    // Premultiplied alpha lets the redirection surface itself be transparent, so
+    // the DWM system Acrylic backdrop shows through in dynamic glass mode. Modes
+    // that draw opaque frames are unaffected.
     const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f,
+        96.0f);
 
     ComPtr<ID2D1HwndRenderTarget> target;
     const HRESULT hr = g_app.d2d->CreateHwndRenderTarget(
@@ -447,7 +286,6 @@ bool InitializeHwndRenderer(HWND hwnd, UINT width, UINT height) {
 
     g_app.hwndTarget = target.Get();
     g_app.rt.Attach(target.Detach());
-    g_app.compositionMode = false;
     g_app.backdropEnabled = false;
     if (!CreateRenderBrush()) {
         g_app.hwndTarget = nullptr;
@@ -467,30 +305,10 @@ void EnsureRenderTarget(HWND hwnd) {
     const UINT width = static_cast<UINT>(std::max<LONG>(1, client.right - client.left));
     const UINT height = static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top));
 
-    if (ShouldUseComposition()) {
-        if (InitializeCompositionRenderer(hwnd, width, height)) return;
-    }
     InitializeHwndRenderer(hwnd, width, height);
 }
 
-void RecreateRenderTarget(HWND hwnd) {
-    if (!hwnd) return;
-    const bool wasVisible = IsWindowVisible(hwnd) && !IsIconic(hwnd);
-    DiscardRenderTarget();
-    EnsureRenderTarget(hwnd);
-    if (wasVisible) InvalidateRect(hwnd, nullptr, FALSE);
-}
-
 void ResizeRenderTarget(UINT width, UINT height) {
-    if (g_app.compositionMode && g_app.d2dContext && g_app.swapChain) {
-        g_app.d2dContext->SetTarget(nullptr);
-        g_app.targetBitmap.Reset();
-        if (SUCCEEDED(g_app.swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0))) {
-            CreateCompositionTargetBitmap();
-            if (g_app.compositionDevice) g_app.compositionDevice->Commit();
-        }
-        return;
-    }
     if (g_app.hwndTarget) {
         g_app.hwndTarget->Resize(D2D1::SizeU(width, height));
     }
@@ -499,17 +317,9 @@ void ResizeRenderTarget(UINT width, UINT height) {
 void DiscardRenderTarget() {
     g_app.brush.Reset();
     g_app.hwndTarget = nullptr;
-    g_app.d2dContext = nullptr;
     g_app.rt.Reset();
     g_app.glassBitmap.Reset();
     g_app.glassAvailable = false;
-    g_app.targetBitmap.Reset();
-    g_app.compositionVisual.Reset();
-    g_app.compositionTarget.Reset();
-    g_app.compositionDevice.Reset();
-    g_app.swapChain.Reset();
-    g_app.d3dDevice.Reset();
-    g_app.compositionMode = false;
     g_app.backdropEnabled = false;
 }
 
@@ -517,8 +327,7 @@ void UpdatePalette() {
     g_app.palette = MakePalette(g_app.dark);
     if (!GlassEnabled()) return;
 
-    const bool live =
-        g_app.compositionMode && g_app.glassMode == GlassMode::Dynamic && g_app.dynamicBackdrop;
+    const bool live = g_app.glassMode == GlassMode::Dynamic && g_app.dynamicBackdrop;
     if (!live && !g_app.backdropEnabled && !g_app.glassAvailable) return;
     if (live) {
         // The compositor already supplies the Acrylic tint and blur; keep our own
@@ -695,7 +504,9 @@ void StartViewAnimation(HWND hwnd) {
     if (y < work.top) y = work.top;
 
     EnsureRenderTarget(hwnd);
-    if (g_app.compositionMode && g_app.rt) {
+    if (g_app.rt) {
+        // Pre-size the surface to the final height so the expand animation does
+        // not recreate buffers every frame.
         ResizeRenderTarget(static_cast<UINT>(width),
                            static_cast<UINT>(std::max(startHeight, targetHeight)));
     }
@@ -1386,8 +1197,7 @@ void PaintMainWindow(HWND hwnd) {
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-    const bool liveBackdrop = g_app.compositionMode &&
-                              g_app.glassMode == GlassMode::Dynamic && g_app.dynamicBackdrop;
+    const bool liveBackdrop = g_app.glassMode == GlassMode::Dynamic && g_app.dynamicBackdrop;
     if (GlassEnabled() && liveBackdrop) {
         rt->Clear(D2D1::ColorF(0, 0.0f));
         SetBrushColor(g_app.brush.Get(), g_app.palette.page);
@@ -1421,9 +1231,6 @@ void PaintMainWindow(HWND hwnd) {
     }
 
     const HRESULT hr = rt->EndDraw();
-    if (SUCCEEDED(hr) && g_app.compositionMode && g_app.swapChain) {
-        g_app.swapChain->Present(0, 0);
-    }
     EndPaint(hwnd, &ps);
 
     if (hr == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) {
@@ -1835,10 +1642,7 @@ void SetGlassMode(GlassMode mode) {
         g_app.glassBitmap.Reset();
         g_app.glassAvailable = false;
         g_app.glassPixels.clear();
-        if (hwnd) {
-            DisableSystemBackdrop(hwnd);
-            if (g_app.compositionMode) RecreateRenderTarget(hwnd);
-        }
+        if (hwnd) DisableSystemBackdrop(hwnd);
         UpdatePalette();
         if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
         return;
@@ -1849,19 +1653,14 @@ void SetGlassMode(GlassMode mode) {
         g_app.glassAvailable = false;
         g_app.glassPixels.clear();
         if (hwnd) {
-            if (!g_app.compositionMode) {
-                RecreateRenderTarget(hwnd);
-            } else {
-                EnsureRenderTarget(hwnd);
-            }
+            EnsureRenderTarget(hwnd);
             if (EnableDynamicBackdrop(hwnd)) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return;
             }
             // Live Acrylic is unavailable (older build or compositor failure);
             // keep the mode selected but use the sampled backdrop instead.
-            if (!CaptureStaticBackdropWithHiddenWindow(hwnd) && g_app.compositionMode &&
-                g_app.rt) {
+            if (!CaptureStaticBackdropWithHiddenWindow(hwnd) && g_app.rt) {
                 EnableStaticBackdropFallback(hwnd);
             }
         }
@@ -1871,7 +1670,6 @@ void SetGlassMode(GlassMode mode) {
     }
 
     if (hwnd) DisableSystemBackdrop(hwnd);
-    if (hwnd && g_app.compositionMode) RecreateRenderTarget(hwnd);
     g_app.glassBitmap.Reset();
     g_app.glassAvailable = false;
     if (!g_app.glassPixels.empty()) {
@@ -1881,7 +1679,7 @@ void SetGlassMode(GlassMode mode) {
             g_app.glassAvailable = true;
         }
     } else if (hwnd) {
-        if (!CaptureStaticBackdropWithHiddenWindow(hwnd) && g_app.compositionMode && g_app.rt) {
+        if (!CaptureStaticBackdropWithHiddenWindow(hwnd) && g_app.rt) {
             EnableStaticBackdropFallback(hwnd);
         }
     }
@@ -2092,6 +1890,18 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         case kUpdateReadyMessage:
             HandleUpdateReadyResult(hwnd, reinterpret_cast<UpdatePrepareResult*>(lParam));
             return 0;
+        case kDragCaptureDoneMessage: {
+            std::unique_ptr<DragCaptureResult> result(
+                reinterpret_cast<DragCaptureResult*>(lParam));
+            SetWindowDisplayAffinity(hwnd, kWdaNone);
+            g_app.dragCapturePending = false;
+            if (result && result->ok && hwnd == g_app.hwnd) {
+                ApplyGlassCapture(result->frame, std::move(result->pixels), result->width,
+                                  result->height);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
         case kQuitForInstallerMessage:
             KillTimer(hwnd, kUpdateLaunchTimer);
             g_app.quitting = true;
@@ -2158,6 +1968,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 if (progress >= 1.0) {
                     g_app.viewAnimationActive = false;
                     KillTimer(hwnd, kViewAnimationTimer);
+                    if (g_app.rt) {
+                        RECT client{};
+                        GetClientRect(hwnd, &client);
+                        ResizeRenderTarget(
+                            static_cast<UINT>(std::max<LONG>(1, client.right - client.left)),
+                            static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top)));
+                    }
                 }
                 return 0;
             }
@@ -2169,13 +1986,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 return 0;
             }
             if (g_app.viewAnimationActive) {
-                if (!g_app.compositionMode && g_app.rt) {
-                    RECT client{};
-                    GetClientRect(hwnd, &client);
-                    ResizeRenderTarget(
-                        static_cast<UINT>(std::max<LONG>(1, client.right - client.left)),
-                        static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top)));
-                }
+                // The surface was pre-sized to the target height; resizing the
+                // HWND target every frame would stall the animation.
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -2209,14 +2021,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                          SWP_NOZORDER | SWP_NOACTIVATE);
             if (g_app.rt) {
                 g_app.rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
-                if (g_app.compositionMode && g_app.d2dContext) {
-                    g_app.d2dContext->SetDpi(static_cast<float>(g_app.dpi),
-                                             static_cast<float>(g_app.dpi));
-                    RECT client{};
-                    GetClientRect(hwnd, &client);
-                    ResizeRenderTarget(static_cast<UINT>(client.right),
-                                       static_cast<UINT>(client.bottom));
-                }
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -2465,6 +2269,24 @@ bool CaptureMainBackdropNow() {
     return true;
 }
 
+void ApplyGlassCapture(const ScreenFrame& frame, std::vector<uint32_t>&& pixels, int width,
+                       int height) {
+    g_app.glassPixels = std::move(pixels);
+    g_app.glassWidth = width;
+    g_app.glassHeight = height;
+    g_app.glassScreenX = frame.x;
+    g_app.glassScreenY = frame.y;
+    g_app.glassScreenWidth = frame.width;
+    g_app.glassScreenHeight = frame.height;
+    g_app.glassAvailable = true;
+    g_app.glassBitmap.Reset();
+    if (g_app.rt) {
+        CreateGlassBitmap();
+    } else {
+        UpdatePalette();
+    }
+}
+
 void RefreshMainBackdrop() {
     if (!g_app.hwnd) return;
     if (!GlassEnabled()) {
@@ -2498,7 +2320,7 @@ void RefreshMainBackdrop() {
         g_app.glassWidth = 0;
         g_app.glassHeight = 0;
         g_app.glassAvailable = false;
-        if (g_app.compositionMode && g_app.rt) {
+        if (g_app.rt) {
             if (g_app.glassMode == GlassMode::Dynamic) {
                 EnableDynamicBackdrop(g_app.hwnd);
             } else {
@@ -2514,21 +2336,26 @@ void RefreshMainBackdrop() {
 
 void RefreshMainBackdropForDrag(HWND hwnd) {
     if (!hwnd || !GlassEnabled()) return;
-    if (g_app.glassMode == GlassMode::Dynamic && g_app.compositionMode &&
-        g_app.dynamicBackdrop) {
-        return;
-    }
+    if (g_app.glassMode == GlassMode::Dynamic && g_app.dynamicBackdrop) return;
+    if (g_app.dragCapturePending) return;
 
-    // Exclude the window from capture instead of cloaking it: the window stays
-    // visible on screen, so there is no one-frame flash while we resample.
+    // Capture on a worker thread so the modal drag loop is not stalled. The
+    // window is excluded from capture (not hidden), so the sample stays correct
+    // even while the window is already moving, and there is no visible flash.
     if (SetWindowDisplayAffinity(hwnd, kWdaExcludeFromCapture)) {
+        g_app.dragCapturePending = true;
         DwmFlush();
-        const bool refreshed = CaptureMainBackdropNow();
-        SetWindowDisplayAffinity(hwnd, kWdaNone);
-        if (refreshed) {
-            InvalidateRect(hwnd, nullptr, FALSE);
-            UpdateWindow(hwnd);
-        }
+        std::thread([hwnd] {
+            auto* result = new DragCaptureResult();
+            std::wstring error;
+            result->ok = CaptureScreen(&result->frame, &error, false) &&
+                         BuildGlassImage(result->frame, kMainGlassFactor, &result->pixels,
+                                         &result->width, &result->height);
+            if (!PostMessageW(hwnd, kDragCaptureDoneMessage, 0,
+                              reinterpret_cast<LPARAM>(result))) {
+                delete result;
+            }
+        }).detach();
         return;
     }
 
@@ -2561,7 +2388,7 @@ void RefreshTheme() {
     g_app.dark = g_app.systemDark;
     UpdatePalette();
     ApplyWindowTheme(g_app.hwnd, g_app.dark);
-    if (g_app.compositionMode && g_app.rt && g_app.hwnd) {
+    if (g_app.rt && g_app.hwnd) {
         if (g_app.glassMode == GlassMode::Dynamic && !g_app.dynamicBackdrop) {
             EnableDynamicBackdrop(g_app.hwnd);
         } else if (GlassEnabled() && !g_app.glassAvailable) {
@@ -2580,7 +2407,7 @@ void SetThemeMode(ThemeMode mode) {
     UpdatePalette();
     SaveThemeMode(mode);
     ApplyWindowTheme(g_app.hwnd, dark);
-    if (g_app.compositionMode && g_app.rt && g_app.hwnd) {
+    if (g_app.rt && g_app.hwnd) {
         if (g_app.glassMode == GlassMode::Dynamic && !g_app.dynamicBackdrop) {
             EnableDynamicBackdrop(g_app.hwnd);
         } else if (GlassEnabled() && !g_app.glassAvailable) {
