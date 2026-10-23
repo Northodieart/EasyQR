@@ -131,8 +131,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.5.0-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.5.0-x64-setup.exe` | 安装版 |
+| `EasyQR-1.5.1-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.5.1-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -174,8 +174,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.5.0
-git push origin v1.5.0
+git tag v1.5.1
+git push origin v1.5.1
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -220,6 +220,12 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.5.1
+
+- 修复毛玻璃只显示成「比纯色浅一点的纯色」：1.5.0 里窗口样式虽然保留了下来，但 `WM_NCACTIVATE` 仍由我们自己返回 TRUE——系统材质是和窗口框架一起由 DWM 绘制的，拦住这一条就等于让 DWM 不画材质（探针第 7 档当初能出材质，正是因为它把这条交给了默认处理）。现在毛玻璃档下 `WM_NCACTIVATE` 交回 `DefWindowProc`。另外样式的应用时机从"显示之前"改到"显示之后"，与探针在可见窗口上应用条件一致。
+- 识别界面的面板跟随样式：结果面板、无结果提示、按钮改用当前档位的材质观感——毛玻璃仍是模糊截图（系统材质无法只覆盖窗口的一部分），半透明改成纯色调、不再依赖模糊纹理，纯色不透明；二维码上的标记（旋钮）保持原来的模糊方案不变。
+- 半透明档在全屏识别无结果时黑屏：该提示卡此前用的是模糊纹理路径，现在改为色调填充，不再触发那条路径。
 
 ### 1.5.0
 

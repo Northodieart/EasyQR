@@ -2020,7 +2020,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         case WM_NCCALCSIZE:
             return 0;
         case WM_NCACTIVATE:
-            if (g_probe.standardFrame) break;  // let DWM own the frame for the probe
+            // DWM only paints the system material together with the frame, so both
+            // the probe's framed variants and the glass style must not answer this.
+            if (g_probe.standardFrame || g_style.framed) break;
             return TRUE;
         case WM_NCHITTEST: {
             POINT cursor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -2484,8 +2486,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             UpdateWindow(hwnd);
         }
     } else {
-        RefreshMainBackdrop();
         ShowWindow(hwnd, showCommand == SW_SHOWMAXIMIZED ? SW_SHOWNORMAL : showCommand);
+        RefreshMainBackdrop();
         ApplyWindowIcons(hwnd);
         UpdateWindow(hwnd);
         if (g_app.closeToTray) EnsureTrayIcon(hwnd);

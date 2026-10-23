@@ -169,7 +169,16 @@ void FillRounded(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const D2D1_
 }
 
 void DrawAcrylicPanel(ID2D1RenderTarget* rt, const OverlayState& state, const D2D1_RECT_F& rect,
-                      float radius, const D2D1_COLOR_F& tint) {
+                      float radius, const D2D1_COLOR_F& tint, bool keepBlur = false) {
+    // Panels follow the window style: glass keeps the blurred screenshot,
+    // translucent is a tint over the captured frame, solid is opaque. The markers
+    // drawn on the codes keep the blur look in every style, so they pass
+    // keepBlur. A material cannot be applied to part of a window, so glass
+    // approximates it with the same blur the panel always had.
+    if (!keepBlur && g_app.glassMode == GlassMode::Translucent) {
+        FillRounded(rt, state.brush.Get(), rect, radius, tint);
+        return;
+    }
     if (!GlassEnabled() || !state.blurBrush) {
         D2D1_COLOR_F solid = tint;
         solid.a = 1.0f;
@@ -267,7 +276,7 @@ void DrawPills(ID2D1RenderTarget* rt, OverlayState* state) {
         const bool emphasized = hovered || state->singleAuto;
         const float radius = kPillHeight * 0.5f;
 
-        DrawAcrylicPanel(rt, *state, hit.pill, radius, kGlassTint);
+        DrawAcrylicPanel(rt, *state, hit.pill, radius, kGlassTint, true);
         if (emphasized) {
             FillRounded(rt, state->brush.Get(), hit.pill, radius,
                         Rgba(0.0f, 0.42f, 0.78f, 0.48f));
