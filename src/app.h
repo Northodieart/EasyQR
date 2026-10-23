@@ -83,3 +83,6 @@ void SetThemeMode(ThemeMode mode);
 void ApplyWindowTheme(HWND hwnd, bool dark);
 void SetStatus(std::wstring text, AppState::StatusKind kind);
 void RefreshMainBackdrop();
+// Drops the system material, alpha and rounding before the window leaves the
+// screen, because DWM otherwise keeps those visuals on the desktop.
+void PrepareWindowForHide(HWND hwnd);

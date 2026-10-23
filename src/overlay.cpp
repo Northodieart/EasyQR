@@ -85,7 +85,7 @@ const D2D1_COLOR_F kOverlayTertiary = Rgba(0.64f, 0.64f, 0.64f, 1.0f);
 const D2D1_COLOR_F kOverlayDanger = Rgb(0xFFB4AB);
 const D2D1_COLOR_F kOverlaySuccess = Rgb(0x8FE6A0);
 const D2D1_COLOR_F kGlassTint = Rgba(0.055f, 0.06f, 0.07f, 0.38f);
-const D2D1_COLOR_F kGlassTintStrong = Rgba(0.045f, 0.05f, 0.06f, 0.52f);
+const D2D1_COLOR_F kGlassTintStrong = Rgba(0.045f, 0.05f, 0.06f, 0.58f);
 const D2D1_COLOR_F kGlassBorder = Rgba(1.0f, 1.0f, 1.0f, 0.18f);
 
 std::wstring FormatTitle(const std::wstring& format) {
@@ -186,7 +186,7 @@ void DrawAcrylicPanel(ID2D1RenderTarget* rt, const OverlayState& state, const D2
         return;
     }
     rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), state.blurBrush.Get());
-    FillRounded(rt, state.brush.Get(), rect, radius, Rgba(0.0f, 0.0f, 0.0f, 0.20f));
+    FillRounded(rt, state.brush.Get(), rect, radius, Rgba(0.0f, 0.0f, 0.0f, 0.30f));
     FillRounded(rt, state.brush.Get(), rect, radius, tint);
 }
 
@@ -431,8 +431,10 @@ void RestoreMainWindow(bool activate) {
         ShowWindow(g_app.hwnd, SW_HIDE);
         return;
     }
-    RefreshMainBackdrop();
+    // Show first, then apply the style: asking DWM for a material on a window
+    // that is not composed yet is what left the window solid after a scan.
     ShowWindow(g_app.hwnd, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
+    RefreshMainBackdrop();
     if (activate) {
         SetForegroundWindow(g_app.hwnd);
         SetFocus(g_app.hwnd);
@@ -1271,6 +1273,7 @@ void FailStart(const std::wstring& status, bool detailedError, const std::wstrin
     DestroyOverlayWindow();
     if (g_app.hwnd) {
         ShowWindow(g_app.hwnd, SW_SHOW);
+        RefreshMainBackdrop();
         SetForegroundWindow(g_app.hwnd);
         SetFocus(g_app.hwnd);
         SetStatus(status, AppState::StatusKind::Error);
@@ -1303,6 +1306,7 @@ void StartScan(ScanMode mode) {
     g_app.keyboardFocus = false;
     g_app.scanReturnToTray = !IsWindowVisible(g_app.hwnd);
 
+    PrepareWindowForHide(g_app.hwnd);
     ShowWindow(g_app.hwnd, SW_HIDE);
     DwmFlush();
     Sleep(180);

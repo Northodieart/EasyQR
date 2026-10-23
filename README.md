@@ -131,8 +131,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.5.1-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.5.1-x64-setup.exe` | 安装版 |
+| `EasyQR-1.5.2-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.5.2-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -174,8 +174,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.5.1
-git push origin v1.5.1
+git tag v1.5.2
+git push origin v1.5.2
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -220,6 +220,12 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.5.2
+
+- 修复从托盘恢复、或全屏识别返回后毛玻璃丢失（变成纯色）：样式此前是在窗口**显示之前**应用，而 DWM 不会给尚未上屏的窗口合成材质——和 1.5.1 修复的启动时机是同一个原因。现在托盘恢复、扫描结束恢复、启动、扫描失败回退四处统一改成「先显示，再应用样式」。
+- 全屏识别开始时先撤掉材质/透明度再隐藏主窗口，避免材质视觉残留在全屏遮罩之下。
+- 识别界面的卡片按样式加深（毛玻璃卡片是"模糊截图 + 更重的色调"）：系统材质只能覆盖整个窗口，无法只覆盖一张卡片，所以卡片只能做观感近似。
 
 ### 1.5.1
 

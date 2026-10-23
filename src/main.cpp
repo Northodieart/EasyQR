@@ -486,21 +486,7 @@ void ToggleAutoStart();
 void ShowMainFromTray(HWND hwnd);
 void HideToTray(HWND hwnd);
 
-void PrepareWindowForHide(HWND hwnd) {
-    if (!hwnd) return;
-    // DWM keeps the material and the rounded frame of an extended-frame window
-    // composed after it is hidden, which left a dark card (or a 1px ring) on the
-    // desktop. Drop the backdrop state while the window is still visible, so it
-    // hides as an ordinary opaque window.
-    const BOOL alphaOff = FALSE;
-    DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &alphaOff, sizeof(alphaOff));
-    const int none = 1;
-    DwmSetWindowAttribute(hwnd, 38, &none, sizeof(none));
-    const MARGINS zero{0, 0, 0, 0};
-    DwmExtendFrameIntoClientArea(hwnd, &zero);
-    int square = 1;  // DWMWCP_DONOTROUND while hidden
-    SetDwmAttribute(hwnd, 33, &square, sizeof(square));
-}
+
 void QuitApplication(HWND hwnd);
 void UpdateTrayPresence(HWND hwnd);
 void ShowTrayBalloon(const std::wstring& title, const std::wstring& text, bool error);
@@ -1478,8 +1464,11 @@ void ApplyWindowIcons(HWND hwnd) {
 void ShowMainFromTray(HWND hwnd) {
     if (!hwnd) return;
     g_app.launchedHidden = false;
-    RefreshMainBackdrop();
+    // Show first, then ask DWM for the material: a backdrop requested while the
+    // window is not on screen is never composed, which lost the glass every time
+    // the window came back from the tray.
     ShowWindow(hwnd, SW_RESTORE);
+    RefreshMainBackdrop();
     ApplyWindowIcons(hwnd);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
@@ -2235,6 +2224,21 @@ void SetStatus(std::wstring text, AppState::StatusKind kind) {
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
+void PrepareWindowForHide(HWND hwnd) {
+    if (!hwnd) return;
+    // DWM keeps the material and the rounded frame of an extended-frame window
+    // composed after it is hidden, which left a dark card (or a 1px ring) on the
+    // desktop. Drop the backdrop state while the window is still visible, so it
+    // hides as an ordinary opaque window.
+    const BOOL alphaOff = FALSE;
+    DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &alphaOff, sizeof(alphaOff));
+    const int none = 1;
+    DwmSetWindowAttribute(hwnd, 38, &none, sizeof(none));
+    const MARGINS zero{0, 0, 0, 0};
+    DwmExtendFrameIntoClientArea(hwnd, &zero);
+    int square = 1;  // DWMWCP_DONOTROUND while hidden
+    SetDwmAttribute(hwnd, 33, &square, sizeof(square));
+}
 // Re-applies the selected style to the window. The render target has to be
 // rebuilt whenever the surface alpha mode changes, which is why this is not just
 // a DWM call.
