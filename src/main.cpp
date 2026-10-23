@@ -2008,11 +2008,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         }
         case WM_NCCALCSIZE:
             return 0;
-        case WM_NCACTIVATE:
-            // DWM only paints the system material together with the frame, so both
-            // the probe's framed variants and the glass style must not answer this.
-            if (g_probe.standardFrame || g_style.framed) break;
+        case WM_NCACTIVATE: {
+            // DWM paints the system material together with the frame, so this must
+            // reach DefWindowProc. The frame pass can land on screen as a flash on
+            // activation, so repaint the client right after it.
+            if (g_probe.standardFrame || g_style.framed) {
+                const LRESULT result = DefWindowProcW(hwnd, message, wParam, lParam);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return result;
+            }
             return TRUE;
+        }
         case WM_NCHITTEST: {
             POINT cursor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ScreenToClient(hwnd, &cursor);
