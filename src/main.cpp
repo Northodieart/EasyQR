@@ -358,9 +358,12 @@ void ApplyGlassStyle(HWND hwnd) {
     g_style.material = SUCCEEDED(DwmSetWindowAttribute(hwnd, 38, &material, sizeof(material)))
                            ? kCallAccepted
                            : kCallRefused;
-    const MARGINS sheet{-1, -1, -1, -1};
-    g_style.frame =
-        SUCCEEDED(DwmExtendFrameIntoClientArea(hwnd, &sheet)) ? kCallAccepted : kCallRefused;
+    // The client is already per-pixel transparent, so the material shows through
+    // without turning the whole window into non-client area. Extending the frame
+    // is what let the classic caption get painted across the window when
+    // WM_NCACTIVATE reached DefWindowProc.
+    const MARGINS zero{0, 0, 0, 0};
+    DwmExtendFrameIntoClientArea(hwnd, &zero);
     g_style.framed = true;
 }
 
@@ -2008,11 +2011,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         }
         case WM_NCCALCSIZE:
             return 0;
-        case WM_NCACTIVATE:
-            // Answering this ourselves keeps DefWindowProc from painting the
-            // classic non-client frame; with the frame extended into the client
-            // area that paint covered the whole window for a frame or two.
+        case WM_NCACTIVATE: {
+            // The system material is painted together with the frame, so this must
+            // reach DefWindowProc. No frame is extended into the client any more,
+            // so that pass has no non-client area to draw on.
+            if (g_probe.standardFrame || g_style.framed) {
+                const LRESULT result = DefWindowProcW(hwnd, message, wParam, lParam);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return result;
+            }
             return TRUE;
+        }
         case WM_NCHITTEST: {
             POINT cursor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ScreenToClient(hwnd, &cursor);
