@@ -473,10 +473,69 @@ int CompareVersions(const std::wstring& left, const std::wstring& right) {
     return 0;
 }
 
+// Splits the compact JSON array GitHub returns into its top-level objects.
+std::vector<std::string> SplitJsonObjects(const std::string& body) {
+    std::vector<std::string> objects;
+    int depth = 0;
+    size_t start = std::string::npos;
+    bool inString = false;
+    bool escaped = false;
+    for (size_t i = 0; i < body.size(); ++i) {
+        const char c = body[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            inString = true;
+        } else if (c == '{') {
+            if (depth == 0) start = i;
+            ++depth;
+        } else if (c == '}') {
+            if (depth > 0) --depth;
+            if (depth == 0 && start != std::string::npos) {
+                objects.emplace_back(body.substr(start, i - start + 1));
+                start = std::string::npos;
+            }
+        }
+    }
+    return objects;
+}
+
+// Picks the release with the highest version number ourselves: the "latest"
+// endpoint follows publication time, and a CI run that finishes late can publish
+// an older tag after a newer one, which would offer a downgrade.
+std::string SelectNewestRelease(const std::string& body, std::wstring* version) {
+    std::string best;
+    std::wstring bestVersion;
+    for (const std::string& object : SplitJsonObjects(body)) {
+        if (object.find("\"draft\":true") != std::string::npos) continue;
+        if (object.find("\"prerelease\":true") != std::string::npos) continue;
+        std::string tag;
+        if (!IsJsonString(object, "tag_name", &tag) || tag.empty()) continue;
+        const std::wstring wideTag(tag.begin(), tag.end());
+        if (!IsSafeTag(wideTag)) continue;
+        const std::wstring candidate = NormalizeVersion(wideTag);
+        if (!IsValidVersion(candidate)) continue;
+        if (best.empty() || CompareVersions(candidate, bestVersion) > 0) {
+            best = object;
+            bestVersion = candidate;
+        }
+    }
+    if (!best.empty() && version) *version = bestVersion;
+    return best;
+}
+
 UpdateCheckResult CheckForUpdate(const std::wstring& currentVersion) {
     UpdateCheckResult result;
     const std::wstring api = L"https://api.github.com/repos/" + std::wstring(kOwner) + L"/" +
-                             kRepository + L"/releases/latest";
+                             kRepository + L"/releases?per_page=20";
     HttpResponse response;
     if (!HttpGet(api, &response)) {
         result.error = response.error.empty() ? L"检查更新失败" : response.error;
@@ -495,7 +554,13 @@ UpdateCheckResult CheckForUpdate(const std::wstring& currentVersion) {
         return result;
     }
 
-    const std::string body(response.body.begin(), response.body.end());
+    const std::string listing(response.body.begin(), response.body.end());
+    std::wstring listedVersion;
+    const std::string body = SelectNewestRelease(listing, &listedVersion);
+    if (body.empty()) {
+        result.error = L"GitHub 上还没有可用的正式版本";
+        return result;
+    }
     std::string tag;
     if (!IsJsonString(body, "tag_name", &tag) || tag.empty()) {
         result.error = L"无法解析 GitHub 版本信息";
@@ -508,7 +573,7 @@ UpdateCheckResult CheckForUpdate(const std::wstring& currentVersion) {
     }
 
     result.tag = wideTag;
-    std::wstring version = NormalizeVersion(wideTag);
+    std::wstring version = listedVersion.empty() ? NormalizeVersion(wideTag) : listedVersion;
     if (!IsValidVersion(version)) {
         std::string releaseName;
         if (IsJsonString(body, "name", &releaseName)) {

@@ -132,8 +132,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.4.16-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.4.16-x64-setup.exe` | 安装版 |
+| `EasyQR-1.4.17-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.4.17-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -175,8 +175,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.4.16
-git push origin v1.4.16
+git tag v1.4.17
+git push origin v1.4.17
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -221,6 +221,10 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.4.17
+
+- 修复「检查更新」可能把用户带回旧版本：更新检查此前读取 GitHub 的 `releases/latest`，而它的「latest」按**发布时间**排序——1.4.15 的 CI 排队卡了约 50 分钟，恢复后比 1.4.16 还晚发布，于是 `latest` 指向了 1.4.15。现在改为拉取发布列表并自己按版本号取最高（跳过 draft / prerelease），发布顺序再乱也不会误报。
 
 ### 1.4.16
 
