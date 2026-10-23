@@ -2017,7 +2017,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             // so that pass has no non-client area to draw on.
             if (g_probe.standardFrame || g_style.framed) {
                 const LRESULT result = DefWindowProcW(hwnd, message, wParam, lParam);
-                InvalidateRect(hwnd, nullptr, FALSE);
+                // Repaint the client and the frame area synchronously: an async
+                // invalidate left the non-client pass visible for a frame.
+                RedrawWindow(hwnd, nullptr, nullptr,
+                             RDW_INVALIDATE | RDW_UPDATENOW | RDW_FRAME | RDW_ALLCHILDREN);
                 return result;
             }
             return TRUE;
