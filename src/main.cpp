@@ -6,8 +6,10 @@
 #include "update.h"
 #include "version.h"
 
+#include <mmsystem.h>
 #include <shlobj.h>
 
+#include <atomic>
 #include <cstring>
 #include <cwchar>
 
@@ -17,7 +19,6 @@ void RefreshMainBackdropForDrag(HWND hwnd);
 bool CaptureMainBackdropNow();
 void StartLiveSampling(HWND hwnd);
 void StopLiveSampling(HWND hwnd);
-void RequestBackdropSample();
 
 struct DragCaptureResult {
     ScreenFrame frame{};
@@ -43,14 +44,17 @@ constexpr UINT kQuitForInstallerMessage = WM_APP + 22;
 constexpr UINT kUpdateCheckDoneMessage = WM_APP + 30;
 constexpr UINT kUpdateReadyMessage = WM_APP + 31;
 constexpr UINT kDragCaptureDoneMessage = WM_APP + 32;
+constexpr UINT kLiveSampleDoneMessage = WM_APP + 33;
 
 constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
 constexpr UINT_PTR kViewAnimationTimer = 2;
 constexpr UINT_PTR kUpdateLaunchTimer = 3;
 constexpr UINT_PTR kSliderTimer = 4;
-constexpr UINT_PTR kLiveSampleTimer = 5;
-constexpr UINT kLiveSampleIntervalMs = 20;
+// Target period for the live sampler: 8 ms aims at the 120 Hz refresh rate. The
+// loop paces itself to this and runs as close to it as the grab allows, so the
+// measured rate in the probe line is what actually matters.
+constexpr UINT kLiveSamplePeriodMs = 8;
 constexpr int kLiveGlassScale = 12;  // desktop pixels per glass pixel
 constexpr UINT kViewAnimationDurationMs = 200;
 constexpr UINT kUpdateLaunchTimeoutMs = 90000;
@@ -277,6 +281,14 @@ struct LiveRate {
 
 LiveRate g_liveRate;
 
+// One long-lived thread grabs, shrinks and blurs back to back instead of being
+// woken by a timer: the wake-up cost and the per-sample thread both showed up in
+// the achieved frame rate. Only the small blurred result crosses back to the UI
+// thread, so the full-resolution scratch buffer never leaves that loop.
+std::thread g_liveThread;
+std::atomic<bool> g_liveStop{false};
+std::atomic<UINT> g_livePeriodMs{kLiveSamplePeriodMs};
+
 void NoteAppliedSample() {
     const ULONGLONG now = GetTickCount64();
     if (!g_liveRate.windowStart) {
@@ -404,10 +416,10 @@ bool ProbeUsesSampler() {
            g_probe.variant == kProbeFastBlend;
 }
 
-// How often the live sampler grabs, in ms.
+// How often the live sampler aims to grab, in ms.
 UINT ProbeSampleIntervalMs() {
-    if (g_probe.variant == kProbeFastOpaque || g_probe.variant == kProbeFastBlend) return 10;
-    return kLiveSampleIntervalMs;
+    if (g_probe.variant == kProbeFastOpaque || g_probe.variant == kProbeFastBlend) return 6;
+    return kLiveSamplePeriodMs;
 }
 
 // Opacity of the sampled texture itself; below 1 lets the live desktop through.
@@ -457,9 +469,7 @@ void SwitchProbeVariant(HWND hwnd, int variant) {
     g_probe.requested = requested;
     g_probe.variant = variant;
     ApplyBackdropProbe(hwnd);
-    if (g_app.liveSampling) {
-        SetTimer(hwnd, kLiveSampleTimer, ProbeSampleIntervalMs(), nullptr);
-    }
+    g_livePeriodMs.store(ProbeSampleIntervalMs());
     DiscardRenderTarget();
     EnsureRenderTarget(hwnd);
     RefreshMainBackdrop();
@@ -1293,7 +1303,7 @@ void DrawSettings(ID2D1RenderTarget* rt) {
                         static_cast<int>(g_app.glassMode),
                         SliderPosition(g_app.glassSlider, static_cast<float>(g_app.glassMode)));
 
-    std::wstring glassNote = L"静态拖动时重采样 · 动态后台实时采样（约 50fps） · 实时透明不采样";
+    std::wstring glassNote = L"静态拖动时重采样 · 动态后台连续采样 · 实时透明不采样";
     D2D1_COLOR_F glassNoteColor = g_app.palette.tertiary;
     if (g_app.glassMode == GlassMode::Realtime && !g_app.realtimeAlpha) {
         glassNote = L"实时透明需要 Windows 11 24H2 及以上，当前按无模糊显示";
@@ -2129,6 +2139,18 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         case kUpdateReadyMessage:
             HandleUpdateReadyResult(hwnd, reinterpret_cast<UpdatePrepareResult*>(lParam));
             return 0;
+        case kLiveSampleDoneMessage: {
+            std::unique_ptr<DragCaptureResult> result(
+                reinterpret_cast<DragCaptureResult*>(lParam));
+            if (!g_app.liveSampling || hwnd != g_app.hwnd) return 0;
+            if (result && result->ok) {
+                ApplyGlassCapture(result->frame, std::move(result->pixels), result->width,
+                                  result->height);
+                NoteAppliedSample();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
         case kDragCaptureDoneMessage: {
             std::unique_ptr<DragCaptureResult> result(
                 reinterpret_cast<DragCaptureResult*>(lParam));
@@ -2176,12 +2198,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             PaintMainWindow(hwnd);
             return 0;
         case WM_TIMER:
-            if (wParam == kLiveSampleTimer) {
-                if (!g_app.liveSampling) return 0;
-                // Sampling continues through a drag so the backdrop keeps animating.
-                if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) RequestBackdropSample();
-                return 0;
-            }
             if (wParam == kSliderTimer) {
                 bool animating = false;
                 const ULONGLONG now = GetTickCount64();
@@ -2310,7 +2326,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             RefreshMainBackdropForDrag(hwnd);
             break;
         case WM_EXITSIZEMOVE:
-            if (g_app.liveSampling) RequestBackdropSample();
             break;
         case WM_MOVE:
             if (GlassEnabled() && g_app.glassAvailable) {
@@ -2521,8 +2536,8 @@ bool CaptureMainBackdropNow() {
     std::vector<uint32_t> pixels;
     int width = 0;
     int height = 0;
-    if (!CaptureScreenScaled(kMainGlassScale, &frame, &error) ||
-        !BuildGlassImage(frame, 1, &pixels, &width, &height)) {
+    if (!CaptureScreen(&frame, &error, false, false) ||
+        !BuildGlassImage(frame, kMainGlassScale, &pixels, &width, &height)) {
         return false;
     }
 
@@ -2531,8 +2546,8 @@ bool CaptureMainBackdropNow() {
     g_app.glassHeight = height;
     g_app.glassScreenX = frame.x;
     g_app.glassScreenY = frame.y;
-    g_app.glassScreenWidth = frame.regionWidth;
-    g_app.glassScreenHeight = frame.regionHeight;
+    g_app.glassScreenWidth = frame.width;
+    g_app.glassScreenHeight = frame.height;
     g_app.glassAvailable = true;
     g_app.glassBitmap.Reset();
     if (g_app.rt) {
@@ -2550,8 +2565,8 @@ void ApplyGlassCapture(const ScreenFrame& frame, std::vector<uint32_t>&& pixels,
     g_app.glassHeight = height;
     g_app.glassScreenX = frame.x;
     g_app.glassScreenY = frame.y;
-    g_app.glassScreenWidth = frame.regionWidth;
-    g_app.glassScreenHeight = frame.regionHeight;
+    g_app.glassScreenWidth = frame.width;
+    g_app.glassScreenHeight = frame.height;
     g_app.glassAvailable = true;
     g_app.glassBitmap.Reset();
     if (g_app.rt) {
@@ -2561,23 +2576,86 @@ void ApplyGlassCapture(const ScreenFrame& frame, std::vector<uint32_t>&& pixels,
     }
 }
 
-void RequestBackdropSample() {
-    HWND hwnd = g_app.hwnd;
-    if (!hwnd || g_app.dragCapturePending) return;
-    g_app.dragCapturePending = true;
-    // The grab runs off the UI thread: a full-desktop BitBlt on the paint path
-    // is what made the glass lag behind the pointer.
-    std::thread([hwnd] {
-        auto* result = new DragCaptureResult();
-        std::wstring error;
-        result->ok = CaptureScreenScaled(kLiveGlassScale, &result->frame, &error) &&
-                     BuildGlassImage(result->frame, 1, &result->pixels,
-                                     &result->width, &result->height);
-        if (!PostMessageW(hwnd, kDragCaptureDoneMessage, 0,
-                          reinterpret_cast<LPARAM>(result))) {
-            delete result;
+// The live sampler grabs the window plus a margin instead of the whole desktop:
+// the grab is what sets the frame rate, and the area is the only part of it we
+// control. The margin keeps a fast drag inside the sampled area, which the
+// anchored crop needs to stay correct.
+bool LiveSampleRect(RECT* out) {
+    if (!g_app.hwnd || !GetWindowRect(g_app.hwnd, out)) return false;
+    // The margin only has to cover what the window can move between two samples,
+    // but a fast flick covers ~80 px, so keep at least 128 px of slack: past the
+    // sampled area the crop clamps and the glass stalls for a frame. The area is
+    // still a fraction of the desktop, which is what the grab time depends on.
+    const int span = std::max(out->right - out->left, out->bottom - out->top);
+    const int margin = std::max(128, span / 4);
+    InflateRect(out, margin, margin);
+    const LONG left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const LONG top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const LONG right = left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const LONG bottom = top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    const RECT clipped{std::max(out->left, left), std::max(out->top, top),
+                       std::min(out->right, right), std::min(out->bottom, bottom)};
+    if (clipped.right - clipped.left < 16 || clipped.bottom - clipped.top < 16) return false;
+    *out = clipped;
+    return true;
+}
+
+void LiveSamplerLoop(HWND hwnd) {
+    timeBeginPeriod(1);
+    ScreenFrame scratch;
+    std::vector<uint32_t> pixels;
+    LARGE_INTEGER clock{};
+    LARGE_INTEGER epoch{};
+    QueryPerformanceFrequency(&clock);
+    QueryPerformanceCounter(&epoch);
+    ULONGLONG slot = 0;
+    while (!g_liveStop.load(std::memory_order_relaxed)) {
+        if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+            Sleep(50);
+            slot = 0;
+            continue;
         }
-    }).detach();
+        RECT bounds{};
+        int width = 0;
+        int height = 0;
+        if (LiveSampleRect(&bounds) && CaptureScreenRect(bounds, &scratch, nullptr) &&
+            BuildGlassImage(scratch, kLiveGlassScale, &pixels, &width, &height)) {
+            // Hardware-accelerated or protected surfaces can come back uniformly
+            // black from a GDI grab; dropping those frames avoids a black flash.
+            uint64_t sum = 0;
+            for (uint32_t pixel : pixels) {
+                sum += (pixel & 0xffu) + ((pixel >> 8) & 0xffu) + ((pixel >> 16) & 0xffu);
+            }
+            const double mean =
+                pixels.empty() ? 0.0 : static_cast<double>(sum) /
+                                           (static_cast<double>(pixels.size()) * 3.0);
+            if (mean >= 3.0) {
+                auto* result = new DragCaptureResult();
+                result->frame.x = bounds.left;
+                result->frame.y = bounds.top;
+                result->frame.width = bounds.right - bounds.left;
+                result->frame.height = bounds.bottom - bounds.top;
+                result->pixels = std::move(pixels);
+                result->width = width;
+                result->height = height;
+                result->ok = true;
+                if (!PostMessageW(hwnd, kLiveSampleDoneMessage, 0,
+                                  reinterpret_cast<LPARAM>(result))) {
+                    delete result;
+                }
+                pixels.clear();
+            }
+        }
+        QueryPerformanceCounter(&clock);
+        const ULONGLONG elapsed =
+            (clock.QuadPart - epoch.QuadPart) * 1000 / clock.QuadPart;
+        if (slot + 200 < elapsed) slot = elapsed;  // resync after a stall
+        slot += g_livePeriodMs.load(std::memory_order_relaxed);
+        if (elapsed < slot) {
+            Sleep(static_cast<DWORD>(slot - elapsed));
+        }
+    }
+    timeEndPeriod(1);
 }
 
 void StartLiveSampling(HWND hwnd) {
@@ -2585,19 +2663,21 @@ void StartLiveSampling(HWND hwnd) {
     // Keep our own glass out of the sample. The window stays visible on screen;
     // only screen-capture APIs skip it, so there is no flicker and no cloak.
     SetWindowDisplayAffinity(hwnd, kWdaExcludeFromCapture);
+    if (g_liveThread.joinable()) g_liveThread.join();
+    g_liveStop.store(false);
+    g_livePeriodMs.store(ProbeSampleIntervalMs());
     g_app.liveSampling = true;
-    SetTimer(hwnd, kLiveSampleTimer, ProbeSampleIntervalMs(), nullptr);
-    RequestBackdropSample();
+    g_liveThread = std::thread(LiveSamplerLoop, hwnd);
 }
 
 void StopLiveSampling(HWND hwnd) {
-    if (!hwnd) {
-        g_app.liveSampling = false;
-        return;
-    }
-    if (g_app.liveSampling) KillTimer(hwnd, kLiveSampleTimer);
     g_app.liveSampling = false;
     g_liveRate = LiveRate{};
+    if (g_liveThread.joinable()) {
+        g_liveStop.store(true);
+        g_liveThread.join();
+    }
+    if (!hwnd) return;
     // Idempotent on purpose: leaving the window excluded from capture once the
     // sampler is off makes it vanish from screenshots and screen recordings.
     SetWindowDisplayAffinity(hwnd, kWdaNone);
@@ -2677,8 +2757,8 @@ void RefreshMainBackdropForDrag(HWND hwnd) {
         std::thread([hwnd] {
             auto* result = new DragCaptureResult();
             std::wstring error;
-            result->ok = CaptureScreenScaled(kMainGlassScale, &result->frame, &error) &&
-                         BuildGlassImage(result->frame, 1, &result->pixels,
+            result->ok = CaptureScreen(&result->frame, &error, false, false) &&
+                         BuildGlassImage(result->frame, kMainGlassScale, &result->pixels,
                                          &result->width, &result->height);
             if (!PostMessageW(hwnd, kDragCaptureDoneMessage, 0,
                               reinterpret_cast<LPARAM>(result))) {

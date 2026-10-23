@@ -22,20 +22,16 @@ std::wstring LastErrorText(const wchar_t* prefix) {
 }  // namespace
 
 static bool CaptureBounds(const RECT& bounds, ScreenFrame* frame, std::wstring* error,
-                      bool includeGray, bool captureLayered, int scale = 1) {
-    if (!frame || scale < 1) return false;
+                      bool includeGray, bool captureLayered) {
+    if (!frame) return false;
 
     ScreenFrame result;
     result.x = bounds.left;
     result.y = bounds.top;
-    result.width = (bounds.right - bounds.left + scale - 1) / scale;
-    result.height = (bounds.bottom - bounds.top + scale - 1) / scale;
-    const int sourceWidth = bounds.right - bounds.left;
-    const int sourceHeight = bounds.bottom - bounds.top;
-    result.regionWidth = sourceWidth;
-    result.regionHeight = sourceHeight;
+    result.width = bounds.right - bounds.left;
+    result.height = bounds.bottom - bounds.top;
 
-    if (sourceWidth <= 0 || sourceHeight <= 0) {
+    if (result.width <= 0 || result.height <= 0) {
         if (error) *error = L"无法获取屏幕尺寸。";
         return false;
     }
@@ -80,19 +76,12 @@ static bool CaptureBounds(const RECT& bounds, ScreenFrame* frame, std::wstring* 
 
     HGDIOBJ previous = SelectObject(memory_dc, bitmap);
     const DWORD raster = captureLayered ? (SRCCOPY | CAPTUREBLT) : SRCCOPY;
-    BOOL copied = FALSE;
-    if (scale > 1) {
-        // HALFTONE averages the source blocks, so the shrink replaces the
-        // separate full-resolution downsample pass.
-        SetStretchBltMode(memory_dc, HALFTONE);
-        SetBrushOrgEx(memory_dc, 0, 0, nullptr);
-        copied = StretchBlt(memory_dc, 0, 0, result.width, result.height, screen_dc, result.x,
-                            result.y, sourceWidth, sourceHeight, raster);
-    } else {
-        copied =
-            BitBlt(memory_dc, 0, 0, result.width, result.height, screen_dc, result.x, result.y,
-                   raster);
-    }
+    // Plain BitBlt only: stretching on the DC (HALFTONE in particular) resamples
+    // every source pixel and measured about ten times slower than copying and
+    // shrinking here.
+    BOOL copied =
+        BitBlt(memory_dc, 0, 0, result.width, result.height, screen_dc, result.x, result.y,
+               raster);
     if (!copied && captureLayered) {
         copied = BitBlt(memory_dc, 0, 0, result.width, result.height, screen_dc, result.x,
                         result.y, SRCCOPY);
@@ -111,7 +100,7 @@ static bool CaptureBounds(const RECT& bounds, ScreenFrame* frame, std::wstring* 
     try {
         result.bgra.resize(static_cast<size_t>(pixel_count));
         std::memcpy(result.bgra.data(), bits, static_cast<size_t>(pixel_count) * sizeof(uint32_t));
-        if (includeGray && scale == 1) {
+        if (includeGray) {
             result.gray.resize(static_cast<size_t>(pixel_count));
             const uint32_t* pixels = result.bgra.data();
             uint8_t* gray = result.gray.data();
@@ -151,11 +140,6 @@ bool CaptureScreen(ScreenFrame* frame, std::wstring* error, bool includeGray,
     return CaptureBounds(bounds, frame, error, includeGray, captureLayered);
 }
 
-bool CaptureScreenScaled(int scale, ScreenFrame* frame, std::wstring* error) {
-    const LONG x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    const LONG y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const LONG width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    const LONG height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    const RECT bounds{x, y, x + width, y + height};
-    return CaptureBounds(bounds, frame, error, false, false, scale);
+bool CaptureScreenRect(const RECT& bounds, ScreenFrame* frame, std::wstring* error) {
+    return CaptureBounds(bounds, frame, error, false, false);
 }
