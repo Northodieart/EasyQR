@@ -132,8 +132,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.4.17-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.4.17-x64-setup.exe` | 安装版 |
+| `EasyQR-1.4.18-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.4.18-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -175,8 +175,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.4.17
-git push origin v1.4.17
+git tag v1.4.18
+git push origin v1.4.18
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -221,6 +221,12 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.4.18
+
+- 修复动态模糊收进托盘后桌面上残留的圆角框（1.4.15 的重绘桌面无效）：那条 1px 圆角边框其实是 **DWM 自己画的窗口边框**，不是我们的像素——它不受 `WDA_EXCLUDEFROMCAPTURE` 约束，所以既会出现在截图里，也会在窗口隐藏后留在桌面层。现在用 `DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE` 让 DWM 完全不画这条边框（圆角遮罩仍然生效，界面外观不变）。
+- 采样帧改为「只保留最新一帧」：工作线程每帧只把最新结果放进槽位并唤醒 UI 一次，UI 忙的时候**直接丢弃被超越的旧帧**，不再排进消息队列。此前 UI 跟不上时每一帧都会被延迟应用，等于把排队时长加进了延迟。
+- 探针的诊断行补上更细的四个数：`实测 N/s`（UI 实际应用的帧率）、`抓 Nms`（抓屏+缩小耗时）、`循 Nms`（整个采样循环的节拍）、`总 N`（累计投递帧数）。用 `--probe=10` 启动即可看到，用来区分「抓屏慢」和「UI 处理慢」。
 
 ### 1.4.17
 

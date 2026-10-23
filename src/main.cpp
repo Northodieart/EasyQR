@@ -10,6 +10,7 @@
 #include <shlobj.h>
 
 #include <atomic>
+#include <mutex>
 #include <cstring>
 #include <cwchar>
 
@@ -44,7 +45,7 @@ constexpr UINT kQuitForInstallerMessage = WM_APP + 22;
 constexpr UINT kUpdateCheckDoneMessage = WM_APP + 30;
 constexpr UINT kUpdateReadyMessage = WM_APP + 31;
 constexpr UINT kDragCaptureDoneMessage = WM_APP + 32;
-constexpr UINT kLiveSampleDoneMessage = WM_APP + 33;
+constexpr UINT kLiveSampleReadyMessage = WM_APP + 33;
 
 constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
@@ -287,6 +288,15 @@ LiveRate g_liveRate;
 // thread, so the full-resolution scratch buffer never leaves that loop.
 std::thread g_liveThread;
 std::atomic<bool> g_liveStop{false};
+std::atomic<int> g_liveGrabMs{0};
+std::atomic<int> g_liveLoopMs{0};
+std::atomic<int> g_livePosted{0};
+// The newest finished frame, waiting for the UI thread. Frames that are overtaken
+// while the queue is busy are dropped rather than applied late: showing an old
+// frame late is exactly the lag this mode is trying to avoid.
+std::mutex g_liveFrameMutex;
+std::unique_ptr<DragCaptureResult> g_liveFrame;
+std::atomic<bool> g_liveFramePosted{false};
 std::atomic<UINT> g_livePeriodMs{kLiveSamplePeriodMs};
 
 void NoteAppliedSample() {
@@ -1317,16 +1327,18 @@ void DrawSettings(ID2D1RenderTarget* rt) {
         };
         std::wstring note = L"探针 " + std::to_wstring(g_probe.variant) + L" · 构建 " +
                             std::to_wstring(g_probe.build);
-        if (g_probe.variant != kProbeOff) {
+        if (g_probe.variant == kProbeOff) {
+            note += L"（F1-F11 重新开启）";
+        } else if (ProbeUsesSampler()) {
+            note += L" · 实测 " + std::to_wstring(g_liveRate.perSecond) + L"/s · 抓 " +
+                    std::to_wstring(g_liveGrabMs.load()) + L"ms · 循 " +
+                    std::to_wstring(g_liveLoopMs.load()) + L"ms · 总 " +
+                    std::to_wstring(g_livePosted.load());
+        } else {
             note += L" · alpha=" + std::wstring(flag(g_probe.alpha)) +
                     L" · 材质=" + std::wstring(flag(g_probe.material)) +
                     L" · 边框=" + std::wstring(flag(g_probe.frame)) +
                     (g_probe.standardFrame ? L" · 带框" : L"");
-            if (ProbeUsesSampler()) {
-                note += L" · 实测 " + std::to_wstring(g_liveRate.perSecond) + L"/s";
-            }
-        } else {
-            note += L"（F1-F11 重新开启）";
         }
         glassNote = std::move(note);
         glassNoteColor = g_app.palette.accent;
@@ -2139,16 +2151,20 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         case kUpdateReadyMessage:
             HandleUpdateReadyResult(hwnd, reinterpret_cast<UpdatePrepareResult*>(lParam));
             return 0;
-        case kLiveSampleDoneMessage: {
-            std::unique_ptr<DragCaptureResult> result(
-                reinterpret_cast<DragCaptureResult*>(lParam));
-            if (!g_app.liveSampling || hwnd != g_app.hwnd) return 0;
-            if (result && result->ok) {
-                ApplyGlassCapture(result->frame, std::move(result->pixels), result->width,
-                                  result->height);
-                NoteAppliedSample();
-                InvalidateRect(hwnd, nullptr, FALSE);
+        case kLiveSampleReadyMessage: {
+            // Cleared before taking the frame: a frame that lands in between is
+            // picked up here and its own message simply finds the slot empty.
+            g_liveFramePosted.store(false);
+            std::unique_ptr<DragCaptureResult> result;
+            {
+                std::lock_guard<std::mutex> lock(g_liveFrameMutex);
+                result = std::move(g_liveFrame);
             }
+            if (!g_app.liveSampling || hwnd != g_app.hwnd || !result || !result->ok) return 0;
+            ApplyGlassCapture(result->frame, std::move(result->pixels), result->width,
+                              result->height);
+            NoteAppliedSample();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case kDragCaptureDoneMessage: {
@@ -2606,9 +2622,11 @@ void LiveSamplerLoop(HWND hwnd) {
     std::vector<uint32_t> pixels;
     LARGE_INTEGER clock{};
     LARGE_INTEGER epoch{};
-    QueryPerformanceFrequency(&clock);
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&epoch);
     ULONGLONG slot = 0;
+    ULONGLONG lastElapsed = 0;
     while (!g_liveStop.load(std::memory_order_relaxed)) {
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
             Sleep(50);
@@ -2618,8 +2636,16 @@ void LiveSamplerLoop(HWND hwnd) {
         RECT bounds{};
         int width = 0;
         int height = 0;
-        if (LiveSampleRect(&bounds) && CaptureScreenRect(bounds, &scratch, nullptr) &&
-            BuildGlassImage(scratch, kLiveGlassScale, &pixels, &width, &height)) {
+        LARGE_INTEGER grabStart{};
+        QueryPerformanceCounter(&grabStart);
+        const bool captured =
+            LiveSampleRect(&bounds) && CaptureScreenRect(bounds, &scratch, nullptr) &&
+            BuildGlassImage(scratch, kLiveGlassScale, &pixels, &width, &height);
+        LARGE_INTEGER grabEnd{};
+        QueryPerformanceCounter(&grabEnd);
+        g_liveGrabMs.store(static_cast<int>((grabEnd.QuadPart - grabStart.QuadPart) * 1000 /
+                                           frequency.QuadPart));
+        if (captured) {
             // Hardware-accelerated or protected surfaces can come back uniformly
             // black from a GDI grab; dropping those frames avoids a black flash.
             uint64_t sum = 0;
@@ -2630,25 +2656,31 @@ void LiveSamplerLoop(HWND hwnd) {
                 pixels.empty() ? 0.0 : static_cast<double>(sum) /
                                            (static_cast<double>(pixels.size()) * 3.0);
             if (mean >= 3.0) {
-                auto* result = new DragCaptureResult();
-                result->frame.x = bounds.left;
-                result->frame.y = bounds.top;
-                result->frame.width = bounds.right - bounds.left;
-                result->frame.height = bounds.bottom - bounds.top;
-                result->pixels = std::move(pixels);
-                result->width = width;
-                result->height = height;
-                result->ok = true;
-                if (!PostMessageW(hwnd, kLiveSampleDoneMessage, 0,
-                                  reinterpret_cast<LPARAM>(result))) {
-                    delete result;
+                auto frame = std::make_unique<DragCaptureResult>();
+                frame->frame.x = bounds.left;
+                frame->frame.y = bounds.top;
+                frame->frame.width = bounds.right - bounds.left;
+                frame->frame.height = bounds.bottom - bounds.top;
+                frame->pixels = std::move(pixels);
+                frame->width = width;
+                frame->height = height;
+                frame->ok = true;
+                {
+                    std::lock_guard<std::mutex> lock(g_liveFrameMutex);
+                    g_liveFrame = std::move(frame);
+                }
+                g_livePosted.fetch_add(1);
+                if (!g_liveFramePosted.exchange(true)) {
+                    PostMessageW(hwnd, kLiveSampleReadyMessage, 0, 0);
                 }
                 pixels.clear();
             }
         }
         QueryPerformanceCounter(&clock);
         const ULONGLONG elapsed =
-            (clock.QuadPart - epoch.QuadPart) * 1000 / clock.QuadPart;
+            (clock.QuadPart - epoch.QuadPart) * 1000 / frequency.QuadPart;
+        g_liveLoopMs.store(static_cast<int>(elapsed - lastElapsed));
+        lastElapsed = elapsed;
         if (slot + 200 < elapsed) slot = elapsed;  // resync after a stall
         slot += g_livePeriodMs.load(std::memory_order_relaxed);
         if (elapsed < slot) {
@@ -2673,6 +2705,11 @@ void StartLiveSampling(HWND hwnd) {
 void StopLiveSampling(HWND hwnd) {
     g_app.liveSampling = false;
     g_liveRate = LiveRate{};
+    {
+        std::lock_guard<std::mutex> lock(g_liveFrameMutex);
+        g_liveFrame.reset();
+    }
+    g_liveFramePosted.store(false);
     if (g_liveThread.joinable()) {
         g_liveStop.store(true);
         g_liveThread.join();
@@ -2788,6 +2825,11 @@ void ApplyWindowTheme(HWND hwnd, bool dark) {
     SetDwmAttribute(hwnd, 20, &useDark, sizeof(useDark));  // DWMWA_USE_IMMERSIVE_DARK_MODE
     int corner = 2;                                        // DWMWCP_ROUND
     SetDwmAttribute(hwnd, 33, &corner, sizeof(corner));
+    // The 1px rounded ring is drawn by DWM, not by us. It is not covered by capture
+    // exclusion and DWM keeps it composed after the window hides, which is the
+    // frame left burnt into the desktop. Suppress it and draw our edge ourselves.
+    const COLORREF none = 0xFFFFFFFE;  // DWMWA_COLOR_NONE
+    SetDwmAttribute(hwnd, 34, &none, sizeof(none));  // DWMWA_BORDER_COLOR
 }
 
 void RefreshTheme() {
