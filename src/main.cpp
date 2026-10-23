@@ -1116,16 +1116,14 @@ void DrawSettings(ID2D1RenderTarget* rt) {
                         static_cast<int>(g_app.glassMode),
                         SliderPosition(g_app.glassSlider, static_cast<float>(g_app.glassMode)));
 
-    std::wstring glassNote = L"纯色：不透明，不请求系统材质";
-    D2D1_COLOR_F glassNoteColor = g_app.palette.tertiary;
-    if (g_app.glassMode == GlassMode::Acrylic) {
-        glassNote = AcrylicStyleVisible() ? L"毛玻璃由系统绘制，拖动与视频都不会有延迟"
-                                          : L"毛玻璃需要 Windows 11 24H2 及以上，当前按纯色显示";
-        if (!AcrylicStyleVisible()) glassNoteColor = g_app.palette.secondary;
-    } else if (g_app.glassMode == GlassMode::Translucent) {
-        glassNote = TranslucentStyleVisible() ? L"半透明：桌面直接透出，不做模糊"
-                                              : L"半透明需要 Windows 11 24H2 及以上，当前按纯色显示";
-        if (!TranslucentStyleVisible()) glassNoteColor = g_app.palette.secondary;
+    // The styles explain themselves; only an unavailable one needs a word. The
+    // probe keeps its diagnostic line.
+    std::wstring glassNote;
+    D2D1_COLOR_F glassNoteColor = g_app.palette.secondary;
+    if (g_app.glassMode == GlassMode::Acrylic && !AcrylicStyleVisible()) {
+        glassNote = L"毛玻璃需要 Windows 11 24H2 及以上，当前按纯色显示";
+    } else if (g_app.glassMode == GlassMode::Translucent && !TranslucentStyleVisible()) {
+        glassNote = L"半透明需要 Windows 11 24H2 及以上，当前按纯色显示";
     }
     if (g_probe.Active()) {
         // Built by concatenation: the CRT's swprintf reads %s as a narrow string.
@@ -1146,10 +1144,12 @@ void DrawSettings(ID2D1RenderTarget* rt) {
         glassNote = std::move(note);
         glassNoteColor = g_app.palette.accent;
     }
-    SetBrushColor(g_app.brush.Get(), glassNoteColor);
-    DrawTextEx(rt, g_app.dwrite.Get(), glassNote, g_app.fonts.chipSmall.Get(),
-               D2D1::RectF(24.0f, 160.0f, 376.0f, 176.0f), g_app.brush.Get(),
-               TextAlign::Leading, true, true);
+    if (!glassNote.empty()) {
+        SetBrushColor(g_app.brush.Get(), glassNoteColor);
+        DrawTextEx(rt, g_app.dwrite.Get(), glassNote, g_app.fonts.chipSmall.Get(),
+                   D2D1::RectF(24.0f, 160.0f, 376.0f, 176.0f), g_app.brush.Get(),
+                   TextAlign::Leading, true, true);
+    }
 
     SetBrushColor(g_app.brush.Get(), g_app.palette.footerLine);
     rt->DrawLine(D2D1::Point2F(24.0f, 182.0f), D2D1::Point2F(kClientWidth - 24.0f, 182.0f),

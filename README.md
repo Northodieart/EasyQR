@@ -131,8 +131,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.5.7-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.5.7-x64-setup.exe` | 安装版 |
+| `EasyQR-1.6.0-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.6.0-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -174,8 +174,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.5.7
-git push origin v1.5.7
+git tag v1.6.0
+git push origin v1.6.0
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -220,6 +220,11 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.6.0
+
+- 首个稳定版。外观的「样式」定为三档：纯色 / 毛玻璃（系统 Acrylic，合成期绘制，拖动与视频零延迟，需要 Windows 11 24H2+）/ 半透明（逐像素透明，不模糊）。设置里三档下方的说明文字已移除，只在所选样式不可用（低于 24H2）时提示一句。
+- 1.4.x 与 1.5.x 是围绕动态模糊与系统材质做的迭代版本，相关历史保留在下方记录中。
 
 ### 1.5.7
 
