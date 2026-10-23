@@ -2454,9 +2454,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     const int windowWidth = MulDiv(static_cast<int>(kClientWidth), systemDpi, 96);
     const int windowHeight = MulDiv(static_cast<int>(ClientHeightForView()), systemDpi, 96);
     // WS_THICKFRAME stays for the window's whole life: DWM only composes a system
-    // material behind a window it treats as framed. WM_NCCALCSIZE returns 0, so no
-    // frame area is added and the layout is unchanged.
-    const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX;
+    // material behind a window it treats as framed. WS_CAPTION is dropped on
+    // purpose: the frame is extended into the whole client area, so letting
+    // DefWindowProc paint the non-client area on activation would draw a classic
+    // title bar across the entire window for a frame or two.
+    const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_CAPTION & ~WS_MAXIMIZEBOX;
     // The window must keep a redirection bitmap: WS_EX_NOREDIRECTIONBITMAP would
     // leave DWM no surface to draw the system Acrylic/Mica backdrop into, so the
     // dynamic glass mode would render nothing.
