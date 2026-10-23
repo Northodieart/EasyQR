@@ -653,6 +653,17 @@ void SetGlassMode(GlassMode mode);
 void ToggleAutoStart();
 void ShowMainFromTray(HWND hwnd);
 void HideToTray(HWND hwnd);
+
+// A window that was excluded from capture leaves the desktop holding the pixels
+// it composited while that exclusion was in effect, which can show up as a
+// rounded frame burnt into the wallpaper once the window is gone. Asking the
+// shell to redraw the desktop is the documented way to clear it.
+#ifndef SPI_UPDATEDESKWALLPAPER
+#define SPI_UPDATEDESKWALLPAPER 0x0020  // missing from the mingw headers
+#endif
+void RefreshDesktopBehindExcludedWindow(bool wasExcluded) {
+    if (wasExcluded) SystemParametersInfoW(SPI_UPDATEDESKWALLPAPER, 0, nullptr, 0);
+}
 void QuitApplication(HWND hwnd);
 void UpdateTrayPresence(HWND hwnd);
 void ShowTrayBalloon(const std::wstring& title, const std::wstring& text, bool error);
@@ -1667,9 +1678,11 @@ void HideToTray(HWND hwnd) {
     }
     // Hide first: flipping the capture affinity while the window is still on
     // screen makes DWM rebuild its composition layer at the worst possible
-    // moment, which used to leave a rounded frame burnt into the desktop.
+    // moment.
+    const bool excluded = g_app.liveSampling;
     ShowWindow(hwnd, SW_HIDE);
     StopLiveSampling(hwnd);
+    RefreshDesktopBehindExcludedWindow(excluded);
     DiscardRenderTarget();
     UpdateTrayPresence(hwnd);
     if (!g_app.trayBalloonShown) {
@@ -1681,11 +1694,13 @@ void HideToTray(HWND hwnd) {
 }
 
 void QuitApplication(HWND hwnd) {
+    const bool excluded = g_app.liveSampling;
     g_app.quitting = true;
     StopLiveSampling(hwnd);
     UnregisterConfiguredHotkeys();
     RemoveTrayIcon();
     if (hwnd) DestroyWindow(hwnd);
+    RefreshDesktopBehindExcludedWindow(excluded);
 }
 
 void UnregisterConfiguredHotkeys() {
