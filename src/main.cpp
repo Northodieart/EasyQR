@@ -2008,17 +2008,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         }
         case WM_NCCALCSIZE:
             return 0;
-        case WM_NCACTIVATE: {
-            // DWM paints the system material together with the frame, so this must
-            // reach DefWindowProc. The frame pass can land on screen as a flash on
-            // activation, so repaint the client right after it.
-            if (g_probe.standardFrame || g_style.framed) {
-                const LRESULT result = DefWindowProcW(hwnd, message, wParam, lParam);
-                InvalidateRect(hwnd, nullptr, FALSE);
-                return result;
-            }
+        case WM_NCACTIVATE:
+            // Answering this ourselves keeps DefWindowProc from painting the
+            // classic non-client frame; with the frame extended into the client
+            // area that paint covered the whole window for a frame or two.
             return TRUE;
-        }
         case WM_NCHITTEST: {
             POINT cursor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ScreenToClient(hwnd, &cursor);
@@ -2454,11 +2448,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     const int windowWidth = MulDiv(static_cast<int>(kClientWidth), systemDpi, 96);
     const int windowHeight = MulDiv(static_cast<int>(ClientHeightForView()), systemDpi, 96);
     // WS_THICKFRAME stays for the window's whole life: DWM only composes a system
-    // material behind a window it treats as framed. WS_CAPTION is dropped on
-    // purpose: the frame is extended into the whole client area, so letting
-    // DefWindowProc paint the non-client area on activation would draw a classic
-    // title bar across the entire window for a frame or two.
-    const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_CAPTION & ~WS_MAXIMIZEBOX;
+    // material behind a window it treats as framed. The caption stays as well --
+    // without it the window was unusable on real hardware (fully transparent and
+    // unresponsive), so the activation flash is handled in WM_NCACTIVATE instead.
+    const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX;
     // The window must keep a redirection bitmap: WS_EX_NOREDIRECTIONBITMAP would
     // leave DWM no surface to draw the system Acrylic/Mica backdrop into, so the
     // dynamic glass mode would render nothing.
