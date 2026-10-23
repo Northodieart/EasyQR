@@ -214,22 +214,25 @@ bool LoadCloseToTray() {
 void SaveCloseToTray(bool enabled) { WriteDword(L"CloseToTray", enabled ? 1u : 0u); }
 
 GlassMode LoadGlassMode() {
-    DWORD value = static_cast<DWORD>(GlassMode::Static);
-    if (ReadDword(L"GlassMode", &value) && value <= 3) {
-        return static_cast<GlassMode>(value);
+    DWORD value = 0;
+    if (ReadDword(L"GlassMode", &value)) {
+        // 1.4.18 and earlier stored 0 = none, 1 = static blur, 2 = dynamic blur,
+        // 3 = realtime translucency. The blur modes are now one system material.
+        if (value == 3) return GlassMode::Translucent;
+        if (value <= 2) return value == 0 ? GlassMode::Solid : GlassMode::Acrylic;
     }
 
     // Migrate installations that only have the former on/off switch.
     DWORD legacy = 1;
     if (ReadDword(L"Translucency", &legacy)) {
-        return legacy ? GlassMode::Static : GlassMode::None;
+        return legacy ? GlassMode::Acrylic : GlassMode::Solid;
     }
-    return GlassMode::Static;
+    return GlassMode::Acrylic;
 }
 
 void SaveGlassMode(GlassMode mode) {
     WriteDword(L"GlassMode", static_cast<DWORD>(mode));
-    WriteDword(L"Translucency", mode == GlassMode::None ? 0u : 1u);
+    WriteDword(L"Translucency", mode == GlassMode::Solid ? 0u : 1u);
 }
 
 std::wstring LoadPendingUpdateVersion() { return ReadString(L"PendingUpdateVersion"); }

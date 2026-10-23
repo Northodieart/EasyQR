@@ -1,36 +1,16 @@
 #include "app.h"
 #include "capture.h"
-#include "glass.h"
 #include "overlay.h"
 #include "resource.h"
 #include "update.h"
 #include "version.h"
 
-#include <mmsystem.h>
 #include <shlobj.h>
 
-#include <atomic>
-#include <mutex>
 #include <cstring>
 #include <cwchar>
 
 AppState g_app;
-
-void RefreshMainBackdropForDrag(HWND hwnd);
-bool CaptureMainBackdropNow();
-void StartLiveSampling(HWND hwnd);
-void StopLiveSampling(HWND hwnd);
-
-struct DragCaptureResult {
-    ScreenFrame frame{};
-    std::vector<uint32_t> pixels;
-    int width = 0;
-    int height = 0;
-    bool ok = false;
-};
-
-void ApplyGlassCapture(const ScreenFrame& frame, std::vector<uint32_t>&& pixels, int width,
-                       int height);
 
 namespace {
 
@@ -44,27 +24,17 @@ constexpr UINT kShowMainMessage = WM_APP + 21;
 constexpr UINT kQuitForInstallerMessage = WM_APP + 22;
 constexpr UINT kUpdateCheckDoneMessage = WM_APP + 30;
 constexpr UINT kUpdateReadyMessage = WM_APP + 31;
-constexpr UINT kDragCaptureDoneMessage = WM_APP + 32;
-constexpr UINT kLiveSampleReadyMessage = WM_APP + 33;
 
 constexpr UINT kHotkeyFullscreenId = 1;
 constexpr UINT kHotkeyRegionId = 2;
 constexpr UINT_PTR kViewAnimationTimer = 2;
 constexpr UINT_PTR kUpdateLaunchTimer = 3;
 constexpr UINT_PTR kSliderTimer = 4;
-// Target period for the live sampler: 8 ms aims at the 120 Hz refresh rate. The
-// loop paces itself to this and runs as close to it as the grab allows, so the
-// measured rate in the probe line is what actually matters.
-constexpr UINT kLiveSamplePeriodMs = 8;
-constexpr int kLiveGlassScale = 12;  // desktop pixels per glass pixel
 constexpr UINT kViewAnimationDurationMs = 200;
 constexpr UINT kUpdateLaunchTimeoutMs = 90000;
 constexpr UINT kSliderAnimationDurationMs = 160;
 constexpr DWORD kDwmaCloak = 13;  // DWMWA_CLOAK
 constexpr DWORD kDwmaRedirectionBitmapAlpha = 39;  // DWMWA_REDIRECTIONBITMAP_ALPHA
-constexpr DWORD kWdaNone = 0x0;               // WDA_NONE
-constexpr DWORD kWdaExcludeFromCapture = 0x11;  // WDA_EXCLUDEFROMCAPTURE
-constexpr int kMainGlassScale = 20;
 
 enum TrayCommand : UINT {
     kTrayOpen = 1,
@@ -92,10 +62,9 @@ enum ControlId : int {
     kHotkeyFullscreenControl = 16,
     kHotkeyRegionControl = 17,
     kUpdateButton = 18,
-    kGlassNone = 19,
-    kGlassStatic = 20,
-    kGlassDynamic = 21,
-    kGlassRealtime = 22,
+    kStyleSolid = 19,
+    kStyleAcrylic = 20,
+    kStyleTranslucent = 21,
 };
 
 const D2D1_RECT_F kTileRects[2] = {
@@ -159,7 +128,6 @@ void SetDwmAttribute(HWND hwnd, DWORD attribute, const void* value, DWORD size) 
 }
 
 void UpdatePalette();
-bool CreateGlassBitmap();
 void DiscardRenderTarget();
 void EnsureRenderTarget(HWND hwnd);
 
@@ -173,155 +141,6 @@ bool CreateRenderBrush() {
     }
     g_app.brush = std::move(brush);
     return true;
-}
-
-enum class WindowCompositionAttribute : int { AccentPolicy = 19 };
-
-struct AccentPolicy {
-    int accentState;
-    int accentFlags;
-    DWORD gradientColor;
-    int animationId;
-};
-
-struct WindowCompositionAttributeData {
-    WindowCompositionAttribute attribute;
-    void* data;
-    size_t size;
-};
-
-using SetWindowCompositionAttributeFn =
-    BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
-
-SetWindowCompositionAttributeFn AccentAttributeSetter() {
-    static const SetWindowCompositionAttributeFn setAttribute = [] {
-        HMODULE user32 = GetModuleHandleW(L"user32.dll");
-        FARPROC procedure = user32 ? GetProcAddress(user32, "SetWindowCompositionAttribute")
-                                   : nullptr;
-        SetWindowCompositionAttributeFn function = nullptr;
-        if (procedure) std::memcpy(&function, &procedure, sizeof(function));
-        return function;
-    }();
-    return setAttribute;
-}
-
-bool SetAccentPolicy(HWND hwnd, int state, DWORD gradientColor) {
-    SetWindowCompositionAttributeFn setAttribute = AccentAttributeSetter();
-    if (!setAttribute) return false;
-    AccentPolicy policy{};
-    policy.accentState = state;
-    policy.accentFlags = state == 0 ? 0 : 2;
-    policy.gradientColor = gradientColor;
-    WindowCompositionAttributeData data{WindowCompositionAttribute::AccentPolicy, &policy,
-                                        sizeof(policy)};
-    return setAttribute(hwnd, &data) != FALSE;
-}
-
-// Experimental system-material path, selected with --probe=N on the command line.
-// DWMWA_REDIRECTIONBITMAP_ALPHA (39) makes DWM honour the per-pixel alpha of an
-// ordinary window surface (Windows 11 24H2 onwards); before that the surface is
-// documented to be treated as fully opaque, which is why 1.4.7 rendered black.
-// With alpha honoured, the system backdrop drawn behind the surface becomes
-// visible, so the material is sampled by DWM at composite time and cannot lag.
-// Each variant is a different combination, to be settled on real hardware.
-enum BackdropProbeVariant {
-    kProbeOff = 0,
-    kProbeAlphaOnly = 1,     // alpha only: the real desktop shows through our tint
-    kProbeAcrylicFrame = 2,  // alpha + DWM acrylic + frame extended into the client
-    kProbeAcrylicPlain = 3,  // alpha + DWM acrylic, frame left alone
-    kProbeMicaFrame = 4,     // alpha + DWM mica + frame extended into the client
-    kProbeSampledTint = 5,   // alpha + the sampled blur drawn translucent
-    kProbeAcrylicRaw = 6,    // acrylic + frame, no tint of ours at all
-    kProbeTabbedFrame = 7,   // alpha + the tabbed-window material + frame
-    // The system backdrop is documented to be drawn behind the window "including
-    // its non-client area", and we strip WS_THICKFRAME and answer WM_NCACTIVATE
-    // ourselves. These two keep the standard framed recipe so DWM still sees a
-    // window it wants to paint a backdrop for.
-    kProbeAcrylicStandard = 8,  // acrylic + frame + framed window recipe
-    kProbeMicaStandard = 9,     // mica + frame + framed window recipe
-    // The translucent sampled glass double-exposes: the stale texture and the
-    // live desktop behind it are two different moments. These two sample much
-    // faster and take the blend out (or nearly out) of it.
-    kProbeFastOpaque = 10,  // 10 ms sampling, texture fully opaque
-    kProbeFastBlend = 11,   // 10 ms sampling, texture at 0.92 over the live desktop
-};
-
-// Three states, because "the variant never asked for it" and "DWM refused" look
-// identical to the person reading the line, and mean very different things.
-enum ProbeCall {
-    kCallNotTried = 0,
-    kCallRefused,
-    kCallAccepted,
-};
-
-struct BackdropProbe {
-    int variant = kProbeOff;
-    bool requested = false;  // --probe was given, whichever variant is active now
-    ProbeCall alpha = kCallNotTried;
-    ProbeCall material = kCallNotTried;
-    ProbeCall frame = kCallNotTried;
-    bool standardFrame = false;  // keep WS_THICKFRAME and default WM_NCACTIVATE
-    DWORD createdStyle = 0;
-    int build = 0;
-    bool Active() const { return requested; }
-    // The surface really carries alpha on this build and a variant is selected.
-    bool Usable() const {
-        return requested && alpha == kCallAccepted && variant != kProbeOff;
-    }
-};
-
-BackdropProbe g_probe;
-
-// Applied samples per second, so a real machine can report what a cadence is
-// actually worth instead of what was asked for.
-struct LiveRate {
-    ULONGLONG windowStart = 0;
-    int count = 0;
-    int perSecond = 0;
-};
-
-LiveRate g_liveRate;
-
-// One long-lived thread grabs, shrinks and blurs back to back instead of being
-// woken by a timer: the wake-up cost and the per-sample thread both showed up in
-// the achieved frame rate. Only the small blurred result crosses back to the UI
-// thread, so the full-resolution scratch buffer never leaves that loop.
-std::thread g_liveThread;
-std::atomic<bool> g_liveStop{false};
-std::atomic<int> g_liveGrabMs{0};
-std::atomic<int> g_liveLoopMs{0};
-std::atomic<int> g_livePosted{0};
-// The newest finished frame, waiting for the UI thread. Frames that are overtaken
-// while the queue is busy are dropped rather than applied late: showing an old
-// frame late is exactly the lag this mode is trying to avoid.
-std::mutex g_liveFrameMutex;
-std::unique_ptr<DragCaptureResult> g_liveFrame;
-std::atomic<bool> g_liveFramePosted{false};
-std::atomic<UINT> g_livePeriodMs{kLiveSamplePeriodMs};
-
-void NoteAppliedSample() {
-    const ULONGLONG now = GetTickCount64();
-    if (!g_liveRate.windowStart) {
-        g_liveRate.windowStart = now;
-        return;
-    }
-    ++g_liveRate.count;
-    const ULONGLONG elapsed = now - g_liveRate.windowStart;
-    if (elapsed < 1000) return;
-    g_liveRate.perSecond = static_cast<int>(g_liveRate.count * 1000.0 /
-                                           static_cast<double>(elapsed));
-    g_liveRate.count = 0;
-    g_liveRate.windowStart = now;
-}
-
-// Clears any backdrop state a previous version may have left on the window.
-void DisableSystemBackdrop(HWND hwnd) {
-    if (!hwnd || g_probe.Usable()) return;
-    SetAccentPolicy(hwnd, 0, 0);
-    int backdrop = 1;  // DWMSBT_NONE
-    DwmSetWindowAttribute(hwnd, 38, &backdrop, sizeof(backdrop));
-    MARGINS margins{0, 0, 0, 0};
-    DwmExtendFrameIntoClientArea(hwnd, &margins);
 }
 
 // Reads CurrentBuildNumber so the probe can say which OS it actually ran on.
@@ -341,15 +160,60 @@ int ReadOsBuild() {
     return _wtoi(buffer);
 }
 
-// Puts the window back into the style shape DWM expects for a framed top-level
-// window, without giving up the borderless client area (WM_NCCALCSIZE still
-// returns 0, so nothing is added around the UI).
-void SetProbeWindowStyle(HWND hwnd) {
-    if (!g_probe.createdStyle) {
-        g_probe.createdStyle = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE));
+// Three states, because "the variant never asked for it" and "DWM refused" look
+// identical to the person reading the line, and mean very different things.
+enum ProbeCall {
+    kCallNotTried = 0,
+    kCallRefused,
+    kCallAccepted,
+};
+
+// Experimental system-material path, selected with --probe=N on the command line.
+// DWMWA_REDIRECTIONBITMAP_ALPHA (39) makes DWM honour the per-pixel alpha of an
+// ordinary window surface (Windows 11 24H2 onwards); before that the surface is
+// documented to be treated as fully opaque. With alpha honoured, the system
+// backdrop drawn behind the surface becomes visible, so the material is sampled
+// by DWM at composite time and cannot lag.
+enum BackdropProbeVariant {
+    kProbeOff = 0,
+    kProbeAlphaOnly = 1,     // alpha only: the real desktop shows through our tint
+    kProbeAcrylicFrame = 2,  // alpha + DWM acrylic + frame extended into the client
+    kProbeAcrylicPlain = 3,  // alpha + DWM acrylic, frame left alone
+    kProbeMicaFrame = 4,     // alpha + DWM mica + frame extended into the client
+    kProbeAcrylicRaw = 5,    // acrylic + frame, no tint of ours at all
+    kProbeTabbedFrame = 6,   // alpha + the tabbed-window material + frame
+    kProbeAcrylicStandard = 7,  // acrylic + frame + framed window recipe
+    kProbeMicaStandard = 8,     // mica + frame + framed window recipe
+};
+
+struct BackdropProbe {
+    int variant = kProbeOff;
+    bool requested = false;  // --probe was given, whichever variant is active now
+    ProbeCall alpha = kCallNotTried;
+    ProbeCall material = kCallNotTried;
+    ProbeCall frame = kCallNotTried;
+    bool standardFrame = false;  // keep WS_THICKFRAME and default WM_NCACTIVATE
+    int build = 0;
+    bool Active() const { return requested; }
+    // The surface really carries alpha on this build and a variant is selected.
+    bool Usable() const {
+        return requested && alpha == kCallAccepted && variant != kProbeOff;
     }
-    DWORD style = g_probe.createdStyle & ~static_cast<DWORD>(WS_THICKFRAME);
-    if (g_probe.standardFrame) style |= WS_THICKFRAME;
+};
+
+BackdropProbe g_probe;
+
+DWORD g_createdStyle = 0;
+
+// Puts the window back into the style shape DWM wants for a framed top-level
+// window when the system material is used, without giving up the borderless
+// client area (WM_NCCALCSIZE still returns 0, so the layout is unchanged).
+void SetFramedWindowStyle(HWND hwnd, bool framed) {
+    if (!g_createdStyle) {
+        g_createdStyle = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE));
+    }
+    DWORD style = g_createdStyle & ~static_cast<DWORD>(WS_THICKFRAME);
+    if (framed) style |= WS_THICKFRAME;
     if (static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE)) == style) return;
     SetWindowLongW(hwnd, GWL_STYLE, static_cast<LONG>(style));
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
@@ -361,7 +225,7 @@ void ApplyBackdropProbe(HWND hwnd) {
     g_probe.build = ReadOsBuild();
     g_probe.standardFrame =
         g_probe.variant == kProbeAcrylicStandard || g_probe.variant == kProbeMicaStandard;
-    SetProbeWindowStyle(hwnd);
+    SetFramedWindowStyle(hwnd, g_probe.standardFrame);
     if (g_probe.variant == kProbeOff) return;
     const BOOL enabled = TRUE;
     g_probe.alpha = SUCCEEDED(DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &enabled,
@@ -413,73 +277,123 @@ void ApplyBackdropProbe(HWND hwnd) {
     }
 }
 
+// What DWM accepted for the selected style. Acrylic is the system material drawn
+// behind the window (zero lag, sampled by the compositor); Translucent is the
+// same per-pixel alpha without a material.
+struct GlassStyleState {
+    ProbeCall alpha = kCallNotTried;
+    ProbeCall material = kCallNotTried;
+    ProbeCall frame = kCallNotTried;
+    bool framed = false;
+};
+
+GlassStyleState g_style;
+
+bool AcrylicStyleVisible() {
+    return g_app.glassMode == GlassMode::Acrylic && g_style.alpha == kCallAccepted &&
+           g_style.material == kCallAccepted;
+}
+
+bool TranslucentStyleVisible() {
+    return g_app.glassMode == GlassMode::Translucent && g_style.alpha == kCallAccepted;
+}
+
+// True when the surface carries real per-pixel alpha, so the page tint must be
+// translucent instead of opaque.
+bool TranslucentSurface() {
+    return g_probe.Usable() || AcrylicStyleVisible() || TranslucentStyleVisible();
+}
+
+// Clears every backdrop attribute this window could carry, for the styles that do
+// not use them and for the moment the window is hidden.
+void ClearSystemBackdrop(HWND hwnd) {
+    if (!hwnd) return;
+    const BOOL alphaOff = FALSE;
+    DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &alphaOff, sizeof(alphaOff));
+    const int none = 1;  // DWMSBT_NONE
+    DwmSetWindowAttribute(hwnd, 38, &none, sizeof(none));
+    const MARGINS zero{0, 0, 0, 0};
+    DwmExtendFrameIntoClientArea(hwnd, &zero);
+    int corner = 2;  // DWMWCP_ROUND
+    SetDwmAttribute(hwnd, 33, &corner, sizeof(corner));
+    SetFramedWindowStyle(hwnd, false);
+}
+
+// The material is composed behind the window frame, so a window that strips
+// WS_THICKFRAME and answers WM_NCACTIVATE itself gets nothing at all. Both
+// translucent styles start from per-pixel alpha (24H2+); acrylic additionally
+// asks for the material and extends the frame into the client area.
+void ApplyGlassStyle(HWND hwnd) {
+    if (!hwnd || g_probe.Active()) return;
+    const bool acrylic = g_app.glassMode == GlassMode::Acrylic;
+    const bool translucent = g_app.glassMode == GlassMode::Translucent;
+    g_style = GlassStyleState{};
+    int corner = 2;  // DWMWCP_ROUND, in case the window was hidden square
+    SetDwmAttribute(hwnd, 33, &corner, sizeof(corner));
+    if (!acrylic && !translucent) {
+        ClearSystemBackdrop(hwnd);
+        return;
+    }
+
+    const BOOL alphaOn = TRUE;
+    g_style.alpha = SUCCEEDED(
+                        DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &alphaOn,
+                                              sizeof(alphaOn)))
+                        ? kCallAccepted
+                        : kCallRefused;
+    if (g_style.alpha != kCallAccepted) {
+        // Pre-24H2: nothing can show through, so the solid page is the whole style.
+        ClearSystemBackdrop(hwnd);
+        return;
+    }
+    if (!acrylic) {
+        const int none = 1;
+        DwmSetWindowAttribute(hwnd, 38, &none, sizeof(none));
+        const MARGINS zero{0, 0, 0, 0};
+        DwmExtendFrameIntoClientArea(hwnd, &zero);
+        g_style.framed = false;
+        return;
+    }
+    int material = 3;  // DWMSBT_TRANSIENTWINDOW (acrylic)
+    g_style.material = SUCCEEDED(DwmSetWindowAttribute(hwnd, 38, &material, sizeof(material)))
+                           ? kCallAccepted
+                           : kCallRefused;
+    const MARGINS sheet{-1, -1, -1, -1};
+    g_style.frame =
+        SUCCEEDED(DwmExtendFrameIntoClientArea(hwnd, &sheet)) ? kCallAccepted : kCallRefused;
+    g_style.framed = true;
+}
+
 // The material (or the desktop) is behind the surface, so the page colour is
 // painted as a translucent veil instead of an opaque fill.
-float ProbeTintAlpha() {
-    if (g_probe.variant == kProbeSampledTint) return g_app.dark ? 0.30f : 0.46f;
-    if (g_probe.material == kCallAccepted) return g_app.dark ? 0.42f : 0.58f;
+float StyleVeilAlpha() {
+    if (AcrylicStyleVisible()) return g_app.dark ? 0.42f : 0.58f;
     return g_app.dark ? 0.74f : 0.80f;
 }
 
-bool ProbeUsesSampler() {
-    return g_probe.variant == kProbeSampledTint || g_probe.variant == kProbeFastOpaque ||
-           g_probe.variant == kProbeFastBlend;
-}
-
-// How often the live sampler aims to grab, in ms.
-UINT ProbeSampleIntervalMs() {
-    if (g_probe.variant == kProbeFastOpaque || g_probe.variant == kProbeFastBlend) return 6;
-    return kLiveSamplePeriodMs;
-}
-
-// Opacity of the sampled texture itself; below 1 lets the live desktop through.
-float ProbeGlassOpacity() {
-    if (g_probe.variant == kProbeSampledTint) return 0.85f;
-    if (g_probe.variant == kProbeFastBlend) return 0.92f;
-    return 1.0f;
-}
-
-// True when the surface carries real alpha: the probe asked for it, or 实时透明 is
-// selected and DWM accepted the redirection-bitmap alpha attribute.
-bool TranslucentSurface() {
-    return g_probe.Usable() ||
-           (g_app.glassMode == GlassMode::Realtime && g_app.realtimeAlpha);
-}
-
-// Turns per-pixel alpha on for 实时透明 and off for every other mode, so the
-// shipped glass paths stay exactly as they were.
-void ApplyRealtimeAlpha(HWND hwnd) {
-    if (!hwnd || g_probe.Active()) return;
-    const bool want = g_app.glassMode == GlassMode::Realtime;
-    const BOOL on = want ? TRUE : FALSE;
-    const HRESULT hr =
-        DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &on, sizeof(on));
-    const bool enabled = want && SUCCEEDED(hr);
-    if (enabled == g_app.realtimeAlpha) return;
-    g_app.realtimeAlpha = enabled;
-    DiscardRenderTarget();
-    EnsureRenderTarget(hwnd);
-    InvalidateRect(hwnd, nullptr, FALSE);
+float ProbeTintAlpha() {
+    if (g_probe.material == kCallAccepted) return g_app.dark ? 0.42f : 0.58f;
+    return g_app.dark ? 0.74f : 0.80f;
 }
 
 // Switches variants at runtime so one real-machine session can compare them all,
 // with F12 going back to the shipped path. Only reachable when the app was
 // started with --probe.
 void SwitchProbeVariant(HWND hwnd, int variant) {
-    if (!hwnd || variant < kProbeOff || variant > kProbeFastBlend) return;
+    if (!hwnd || variant < kProbeOff || variant > kProbeMicaStandard) return;
     const BOOL off = FALSE;
     DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &off, sizeof(off));
     const int none = 1;
     DwmSetWindowAttribute(hwnd, 38, &none, sizeof(none));
     const MARGINS zero{0, 0, 0, 0};
     DwmExtendFrameIntoClientArea(hwnd, &zero);
+    SetFramedWindowStyle(hwnd, false);  // the probe still tests framed vs unframed
 
     const bool requested = g_probe.requested;
     g_probe = BackdropProbe{};
     g_probe.requested = requested;
     g_probe.variant = variant;
     ApplyBackdropProbe(hwnd);
-    g_livePeriodMs.store(ProbeSampleIntervalMs());
     DiscardRenderTarget();
     EnsureRenderTarget(hwnd);
     RefreshMainBackdrop();
@@ -494,7 +408,7 @@ void PaintTranslucentVeil(ID2D1RenderTarget* rt, HWND hwnd) {
     const D2D1_RECT_F area =
         D2D1::RectF(0.0f, 0.0f, static_cast<float>(client.right) * scale,
                     static_cast<float>(client.bottom) * scale);
-    const float alpha = g_probe.Active() ? ProbeTintAlpha() : (g_app.dark ? 0.74f : 0.80f);
+    const float alpha = g_probe.Active() ? ProbeTintAlpha() : StyleVeilAlpha();
     SetBrushColor(g_app.brush.Get(), WithAlpha(g_app.palette.page, alpha));
     rt->FillRectangle(area, g_app.brush.Get());
 }
@@ -525,7 +439,6 @@ bool InitializeHwndRenderer(HWND hwnd, UINT width, UINT height) {
         g_app.rt.Reset();
         return false;
     }
-    CreateGlassBitmap();
     UpdatePalette();
     return true;
 }
@@ -551,111 +464,10 @@ void DiscardRenderTarget() {
     g_app.brush.Reset();
     g_app.hwndTarget = nullptr;
     g_app.rt.Reset();
-    g_app.glassBitmap.Reset();
-    g_app.glassAvailable = false;
 }
 
 void UpdatePalette() {
     g_app.palette = MakePalette(g_app.dark);
-    if (!GlassEnabled()) return;
-    if (!g_app.glassAvailable) return;
-
-    // Dynamic glass is re-sampled continuously, so a lighter tint keeps the live
-    // background readable; static glass is sampled once and needs more coverage.
-    const bool live = g_app.glassMode == GlassMode::Dynamic;
-    g_app.palette.page = WithAlpha(g_app.palette.page, live ? (g_app.dark ? 0.34f : 0.52f)
-                                                            : (g_app.dark ? 0.42f : 0.62f));
-    g_app.palette.card = WithAlpha(g_app.palette.card, live ? (g_app.dark ? 0.66f : 0.76f)
-                                                            : (g_app.dark ? 0.72f : 0.80f));
-    g_app.palette.cardHover =
-        WithAlpha(g_app.palette.cardHover, live ? (g_app.dark ? 0.76f : 0.84f)
-                                                : (g_app.dark ? 0.82f : 0.88f));
-    g_app.palette.cardPressed =
-        WithAlpha(g_app.palette.cardPressed, live ? (g_app.dark ? 0.72f : 0.80f)
-                                                  : (g_app.dark ? 0.78f : 0.84f));
-    g_app.palette.border = WithAlpha(g_app.palette.border, live ? 0.58f : 0.68f);
-    g_app.palette.footerLine = WithAlpha(g_app.palette.footerLine, live ? 0.54f : 0.64f);
-    if (!g_app.dark) {
-        g_app.palette.secondary = Rgb(0x3F3F3F);
-        g_app.palette.tertiary = Rgb(0x666666);
-    }
-}
-
-bool CreateGlassBitmap() {
-    if (!GlassEnabled() || !g_app.rt || g_app.glassWidth <= 0 || g_app.glassHeight <= 0 ||
-        g_app.glassPixels.empty()) {
-        g_app.glassBitmap.Reset();
-        g_app.glassAvailable = false;
-        UpdatePalette();
-        return false;
-    }
-
-    const D2D1_SIZE_U size = D2D1::SizeU(static_cast<UINT32>(g_app.glassWidth),
-                                         static_cast<UINT32>(g_app.glassHeight));
-    const UINT32 stride = static_cast<UINT32>(g_app.glassWidth) * 4u;
-
-    // The live sampler updates the same-sized texture ~50 times a second;
-    // refilling it avoids re-allocating a GPU bitmap on every tick.
-    if (g_app.glassBitmap && g_app.glassBitmap->GetSize().width == size.width &&
-        g_app.glassBitmap->GetSize().height == size.height &&
-        SUCCEEDED(g_app.glassBitmap->CopyFromMemory(nullptr, g_app.glassPixels.data(), stride))) {
-        g_app.glassAvailable = true;
-        UpdatePalette();
-        return true;
-    }
-
-    g_app.glassBitmap.Reset();
-    const D2D1_BITMAP_PROPERTIES properties = D2D1::BitmapProperties(
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
-    const HRESULT hr =
-        g_app.rt->CreateBitmap(size, g_app.glassPixels.data(), stride, properties,
-                               g_app.glassBitmap.Put());
-    g_app.glassAvailable = SUCCEEDED(hr) && g_app.glassBitmap;
-    UpdatePalette();
-    return g_app.glassAvailable;
-}
-
-bool DrawGlassBackground(ID2D1RenderTarget* rt, HWND hwnd) {
-    if (!rt || !g_app.glassBitmap || g_app.glassScreenWidth <= 0 ||
-        g_app.glassScreenHeight <= 0) {
-        return false;
-    }
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    const int clientWidth = client.right - client.left;
-    const int clientHeight = client.bottom - client.top;
-    if (clientWidth <= 0 || clientHeight <= 0) return false;
-
-    POINT origin{0, 0};
-    ClientToScreen(hwnd, &origin);
-    const float xScale = static_cast<float>(g_app.glassWidth) / g_app.glassScreenWidth;
-    const float yScale = static_cast<float>(g_app.glassHeight) / g_app.glassScreenHeight;
-    float sourceWidth = clientWidth * xScale;
-    float sourceHeight = clientHeight * yScale;
-    sourceWidth = std::min(sourceWidth, static_cast<float>(g_app.glassWidth));
-    sourceHeight = std::min(sourceHeight, static_cast<float>(g_app.glassHeight));
-    if (sourceWidth <= 0.0f || sourceHeight <= 0.0f) return false;
-
-    // Slide the crop when the window leaves the sampled area instead of shrinking
-    // it: a resized source rect would stretch the glass over the whole window.
-    const float maxLeft = std::max(0.0f, static_cast<float>(g_app.glassWidth) - sourceWidth);
-    const float maxTop = std::max(0.0f, static_cast<float>(g_app.glassHeight) - sourceHeight);
-    const float sourceLeft = std::min(
-        std::max((origin.x - g_app.glassScreenX) * xScale, 0.0f), maxLeft);
-    const float sourceTop = std::min(
-        std::max((origin.y - g_app.glassScreenY) * yScale, 0.0f), maxTop);
-    const D2D1_RECT_F source =
-        D2D1::RectF(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight);
-
-    const float scale = 96.0f / static_cast<float>(g_app.dpi);
-    const D2D1_RECT_F destination =
-        D2D1::RectF(0.0f, 0.0f, clientWidth * scale, clientHeight * scale);
-    rt->DrawBitmap(g_app.glassBitmap.Get(), destination,
-                   ProbeUsesSampler() ? ProbeGlassOpacity() : 1.0f,
-                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
-    SetBrushColor(g_app.brush.Get(), g_app.palette.page);
-    rt->FillRectangle(destination, g_app.brush.Get());
-    return true;
 }
 
 bool IsFocused(int control) {
@@ -674,15 +486,20 @@ void ToggleAutoStart();
 void ShowMainFromTray(HWND hwnd);
 void HideToTray(HWND hwnd);
 
-// A window that was excluded from capture leaves the desktop holding the pixels
-// it composited while that exclusion was in effect, which can show up as a
-// rounded frame burnt into the wallpaper once the window is gone. Asking the
-// shell to redraw the desktop is the documented way to clear it.
-#ifndef SPI_UPDATEDESKWALLPAPER
-#define SPI_UPDATEDESKWALLPAPER 0x0020  // missing from the mingw headers
-#endif
-void RefreshDesktopBehindExcludedWindow(bool wasExcluded) {
-    if (wasExcluded) SystemParametersInfoW(SPI_UPDATEDESKWALLPAPER, 0, nullptr, 0);
+void PrepareWindowForHide(HWND hwnd) {
+    if (!hwnd) return;
+    // DWM keeps the material and the rounded frame of an extended-frame window
+    // composed after it is hidden, which left a dark card (or a 1px ring) on the
+    // desktop. Drop the backdrop state while the window is still visible, so it
+    // hides as an ordinary opaque window.
+    const BOOL alphaOff = FALSE;
+    DwmSetWindowAttribute(hwnd, kDwmaRedirectionBitmapAlpha, &alphaOff, sizeof(alphaOff));
+    const int none = 1;
+    DwmSetWindowAttribute(hwnd, 38, &none, sizeof(none));
+    const MARGINS zero{0, 0, 0, 0};
+    DwmExtendFrameIntoClientArea(hwnd, &zero);
+    int square = 1;  // DWMWCP_DONOTROUND while hidden
+    SetDwmAttribute(hwnd, 33, &square, sizeof(square));
 }
 void QuitApplication(HWND hwnd);
 void UpdateTrayPresence(HWND hwnd);
@@ -794,8 +611,8 @@ int ControlAt(float x, float y) {
     for (int i = 0; i < 3; ++i) {
         if (PointInRect(SegmentRect(kThemeSliderTrack, i, 3), x, y)) return kThemeSystem + i;
     }
-    for (int i = 0; i < 4; ++i) {
-        if (PointInRect(SegmentRect(kGlassSliderTrack, i, 4), x, y)) return kGlassNone + i;
+    for (int i = 0; i < 3; ++i) {
+        if (PointInRect(SegmentRect(kGlassSliderTrack, i, 3), x, y)) return kStyleSolid + i;
     }
     if (PointInRect(kCloseToTrayRow, x, y)) return kCloseToTrayControl;
     if (PointInRect(kAutoStartRow, x, y)) return kAutoStartControl;
@@ -807,10 +624,10 @@ int ControlAt(float x, float y) {
 
 std::vector<int> FocusOrder() {
     if (g_app.view == MainView::Home) return {kFullScreen, kRegion, kSettings};
-    return {kBack, kThemeSystem, kThemeLight, kThemeDark, kGlassNone, kGlassStatic,
-            kGlassDynamic, kGlassRealtime, kCloseToTrayControl, kAutoStartControl,
-            kHotkeyFullscreenControl,
-            kHotkeyRegionControl, kUpdateButton};
+    return {kBack,          kThemeSystem,       kThemeLight,       kThemeDark,
+            kStyleSolid,    kStyleAcrylic,      kStyleTranslucent, kCloseToTrayControl,
+            kAutoStartControl, kHotkeyFullscreenControl, kHotkeyRegionControl,
+            kUpdateButton};
 }
 
 void ResetInteraction() {
@@ -1069,14 +886,12 @@ void BeginSliderAnimation(AppState::SliderAnimation& anim, float target) {
 
 const wchar_t* GlassLabel(GlassMode mode) {
     switch (mode) {
-        case GlassMode::None:
-            return L"无模糊";
-        case GlassMode::Dynamic:
-            return L"动态模糊";
-        case GlassMode::Realtime:
-            return L"实时透明";
+        case GlassMode::Acrylic:
+            return L"毛玻璃";
+        case GlassMode::Translucent:
+            return L"半透明";
         default:
-            return L"静态模糊";
+            return L"纯色";
     }
 }
 
@@ -1296,28 +1111,32 @@ void DrawSettings(ID2D1RenderTarget* rt) {
     SetBrushColor(g_app.brush.Get(), g_app.palette.text);
     DrawTextEx(rt, g_app.dwrite.Get(), L"主题", g_app.fonts.cardBody.Get(), kThemeLabelRect,
                g_app.brush.Get(), TextAlign::Leading, true, true);
-    DrawTextEx(rt, g_app.dwrite.Get(), L"模糊", g_app.fonts.cardBody.Get(), kGlassLabelRect,
+    DrawTextEx(rt, g_app.dwrite.Get(), L"样式", g_app.fonts.cardBody.Get(), kGlassLabelRect,
                g_app.brush.Get(), TextAlign::Leading, true, true);
 
     const wchar_t* const themeLabels[3] = {ThemeLabel(ThemeMode::System),
                                            ThemeLabel(ThemeMode::Light),
                                            ThemeLabel(ThemeMode::Dark)};
-    const wchar_t* const glassLabels[4] = {GlassLabel(GlassMode::None),
-                                           GlassLabel(GlassMode::Static),
-                                           GlassLabel(GlassMode::Dynamic),
-                                           GlassLabel(GlassMode::Realtime)};
+    const wchar_t* const glassLabels[3] = {GlassLabel(GlassMode::Solid),
+                                           GlassLabel(GlassMode::Acrylic),
+                                           GlassLabel(GlassMode::Translucent)};
     DrawSegmentedSlider(rt, kThemeSliderTrack, themeLabels, 3, kThemeSystem,
                         static_cast<int>(g_app.themeMode),
                         SliderPosition(g_app.themeSlider, static_cast<float>(g_app.themeMode)));
-    DrawSegmentedSlider(rt, kGlassSliderTrack, glassLabels, 4, kGlassNone,
+    DrawSegmentedSlider(rt, kGlassSliderTrack, glassLabels, 3, kStyleSolid,
                         static_cast<int>(g_app.glassMode),
                         SliderPosition(g_app.glassSlider, static_cast<float>(g_app.glassMode)));
 
-    std::wstring glassNote = L"静态拖动时重采样 · 动态后台连续采样 · 实时透明不采样";
+    std::wstring glassNote = L"纯色：不透明，不请求系统材质";
     D2D1_COLOR_F glassNoteColor = g_app.palette.tertiary;
-    if (g_app.glassMode == GlassMode::Realtime && !g_app.realtimeAlpha) {
-        glassNote = L"实时透明需要 Windows 11 24H2 及以上，当前按无模糊显示";
-        glassNoteColor = g_app.palette.secondary;
+    if (g_app.glassMode == GlassMode::Acrylic) {
+        glassNote = AcrylicStyleVisible() ? L"毛玻璃由系统绘制，拖动与视频都不会有延迟"
+                                          : L"毛玻璃需要 Windows 11 24H2 及以上，当前按纯色显示";
+        if (!AcrylicStyleVisible()) glassNoteColor = g_app.palette.secondary;
+    } else if (g_app.glassMode == GlassMode::Translucent) {
+        glassNote = TranslucentStyleVisible() ? L"半透明：桌面直接透出，不做模糊"
+                                              : L"半透明需要 Windows 11 24H2 及以上，当前按纯色显示";
+        if (!TranslucentStyleVisible()) glassNoteColor = g_app.palette.secondary;
     }
     if (g_probe.Active()) {
         // Built by concatenation: the CRT's swprintf reads %s as a narrow string.
@@ -1328,12 +1147,7 @@ void DrawSettings(ID2D1RenderTarget* rt) {
         std::wstring note = L"探针 " + std::to_wstring(g_probe.variant) + L" · 构建 " +
                             std::to_wstring(g_probe.build);
         if (g_probe.variant == kProbeOff) {
-            note += L"（F1-F11 重新开启）";
-        } else if (ProbeUsesSampler()) {
-            note += L" · 实测 " + std::to_wstring(g_liveRate.perSecond) + L"/s · 抓 " +
-                    std::to_wstring(g_liveGrabMs.load()) + L"ms · 循 " +
-                    std::to_wstring(g_liveLoopMs.load()) + L"ms · 总 " +
-                    std::to_wstring(g_livePosted.load());
+            note += L"（F1-F8 重新开启）";
         } else {
             note += L" · alpha=" + std::wstring(flag(g_probe.alpha)) +
                     L" · 材质=" + std::wstring(flag(g_probe.material)) +
@@ -1342,9 +1156,6 @@ void DrawSettings(ID2D1RenderTarget* rt) {
         }
         glassNote = std::move(note);
         glassNoteColor = g_app.palette.accent;
-    } else if (g_app.glassMode == GlassMode::Dynamic && !g_app.glassAvailable) {
-        glassNote = L"动态采样暂不可用，背景暂时显示为纯色";
-        glassNoteColor = g_app.palette.secondary;
     }
     SetBrushColor(g_app.brush.Get(), glassNoteColor);
     DrawTextEx(rt, g_app.dwrite.Get(), glassNote, g_app.fonts.chipSmall.Get(),
@@ -1469,14 +1280,6 @@ void PaintMainWindow(HWND hwnd) {
         return;
     }
 
-    const bool wantsLive = g_app.glassMode == GlassMode::Dynamic ||
-                           (g_probe.Usable() && ProbeUsesSampler());
-    if (wantsLive && !g_app.liveSampling && IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
-        // Any path that shows the window ends in a paint, so this is the one
-        // place that has to (re)arm the live sampler.
-        StartLiveSampling(hwnd);
-    }
-
     PAINTSTRUCT ps{};
     BeginPaint(hwnd, &ps);
     ID2D1RenderTarget* rt = g_app.rt.Get();
@@ -1485,14 +1288,9 @@ void PaintMainWindow(HWND hwnd) {
     rt->SetDpi(static_cast<float>(g_app.dpi), static_cast<float>(g_app.dpi));
     if (TranslucentSurface()) {
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-        if (ProbeUsesSampler() && g_app.glassBitmap) {
-            DrawGlassBackground(rt, hwnd);
-        } else if (!g_probe.Active() || g_probe.variant != kProbeAcrylicRaw) {
+        if (!g_probe.Active() || g_probe.variant != kProbeAcrylicRaw) {
             PaintTranslucentVeil(rt, hwnd);
         }
-    } else if (GlassEnabled() && g_app.glassBitmap) {
-        rt->Clear(g_app.palette.page);
-        DrawGlassBackground(rt, hwnd);
     } else {
         rt->Clear(g_app.palette.page);
     }
@@ -1566,8 +1364,8 @@ void ActivateControl(int control) {
         g_app.focusControl = control;
         return;
     }
-    if (control >= kGlassNone && control <= kGlassRealtime) {
-        SetGlassMode(static_cast<GlassMode>(control - kGlassNone));
+    if (control >= kStyleSolid && control <= kStyleTranslucent) {
+        SetGlassMode(static_cast<GlassMode>(control - kStyleSolid));
         g_app.focusControl = control;
         return;
     }
@@ -1698,13 +1496,8 @@ void HideToTray(HWND hwnd) {
                     MB_ICONERROR | MB_OK);
         return;
     }
-    // Hide first: flipping the capture affinity while the window is still on
-    // screen makes DWM rebuild its composition layer at the worst possible
-    // moment.
-    const bool excluded = g_app.liveSampling;
+    PrepareWindowForHide(hwnd);
     ShowWindow(hwnd, SW_HIDE);
-    StopLiveSampling(hwnd);
-    RefreshDesktopBehindExcludedWindow(excluded);
     DiscardRenderTarget();
     UpdateTrayPresence(hwnd);
     if (!g_app.trayBalloonShown) {
@@ -1716,13 +1509,13 @@ void HideToTray(HWND hwnd) {
 }
 
 void QuitApplication(HWND hwnd) {
-    const bool excluded = g_app.liveSampling;
     g_app.quitting = true;
-    StopLiveSampling(hwnd);
     UnregisterConfiguredHotkeys();
     RemoveTrayIcon();
-    if (hwnd) DestroyWindow(hwnd);
-    RefreshDesktopBehindExcludedWindow(excluded);
+    if (hwnd) {
+        PrepareWindowForHide(hwnd);
+        DestroyWindow(hwnd);
+    }
 }
 
 void UnregisterConfiguredHotkeys() {
@@ -1888,64 +1681,14 @@ void ToggleAutoStart() {
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
-bool CaptureStaticBackdropWithHiddenWindow(HWND hwnd) {
-    const bool wasVisible = hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd);
-    if (wasVisible && SetWindowDisplayAffinity(hwnd, kWdaExcludeFromCapture)) {
-        // Capture exclusion keeps the window on screen, avoiding a visible flash.
-        DwmFlush();
-        const bool captured = CaptureMainBackdropNow();
-        SetWindowDisplayAffinity(hwnd, kWdaNone);
-        return captured;
-    }
-    if (wasVisible) {
-        ShowWindow(hwnd, SW_HIDE);
-        DwmFlush();
-        Sleep(40);
-    }
-    const bool captured = CaptureMainBackdropNow();
-    if (wasVisible) {
-        ShowWindow(hwnd, SW_SHOW);
-        SetForegroundWindow(hwnd);
-        SetFocus(hwnd);
-        UpdateWindow(hwnd);
-    }
-    return captured;
-}
-
 void SetGlassMode(GlassMode mode) {
     if (g_app.glassMode == mode) return;
     HWND hwnd = g_app.hwnd;
     if (hwnd && g_app.viewAnimationActive) CompleteViewAnimation(hwnd);
-
     BeginSliderAnimation(g_app.glassSlider, static_cast<float>(mode));
     g_app.glassMode = mode;
     SaveGlassMode(mode);
-
-    if (hwnd) {
-        StopLiveSampling(hwnd);
-        DisableSystemBackdrop(hwnd);
-        ApplyRealtimeAlpha(hwnd);
-        EnsureRenderTarget(hwnd);
-    }
-    g_app.glassBitmap.Reset();
-    g_app.glassAvailable = false;
-
-    if (mode == GlassMode::None) {
-        g_app.glassPixels.clear();
-    } else if (mode == GlassMode::Dynamic) {
-        g_app.glassPixels.clear();
-        if (hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd)) StartLiveSampling(hwnd);
-    } else if (!g_app.glassPixels.empty()) {
-        if (g_app.rt) {
-            CreateGlassBitmap();
-        } else {
-            g_app.glassAvailable = true;
-        }
-    } else if (hwnd) {
-        CaptureStaticBackdropWithHiddenWindow(hwnd);
-    }
-    UpdatePalette();
-    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+    RefreshMainBackdrop();
 }
 
 void JoinUpdateThread() {
@@ -2151,49 +1894,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         case kUpdateReadyMessage:
             HandleUpdateReadyResult(hwnd, reinterpret_cast<UpdatePrepareResult*>(lParam));
             return 0;
-        case kLiveSampleReadyMessage: {
-            // Cleared before taking the frame: a frame that lands in between is
-            // picked up here and its own message simply finds the slot empty.
-            g_liveFramePosted.store(false);
-            std::unique_ptr<DragCaptureResult> result;
-            {
-                std::lock_guard<std::mutex> lock(g_liveFrameMutex);
-                result = std::move(g_liveFrame);
-            }
-            if (!g_app.liveSampling || hwnd != g_app.hwnd || !result || !result->ok) return 0;
-            ApplyGlassCapture(result->frame, std::move(result->pixels), result->width,
-                              result->height);
-            NoteAppliedSample();
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
-        }
-        case kDragCaptureDoneMessage: {
-            std::unique_ptr<DragCaptureResult> result(
-                reinterpret_cast<DragCaptureResult*>(lParam));
-            if (!g_app.liveSampling) SetWindowDisplayAffinity(hwnd, kWdaNone);
-            g_app.dragCapturePending = false;
-            const bool onScreen = IsWindowVisible(hwnd) && !IsIconic(hwnd);
-            if (result && result->ok && hwnd == g_app.hwnd && onScreen) {
-                // Hardware-accelerated or protected surfaces can come back uniformly
-                // black from a GDI grab; keeping the previous texture avoids a flash.
-                uint64_t sum = 0;
-                for (uint32_t pixel : result->pixels) {
-                    sum += (pixel & 0xffu) + ((pixel >> 8) & 0xffu) + ((pixel >> 16) & 0xffu);
-                }
-                const double mean =
-                    result->pixels.empty()
-                        ? 0.0
-                        : static_cast<double>(sum) /
-                              (static_cast<double>(result->pixels.size()) * 3.0);
-                if (mean >= 3.0 || !g_app.glassAvailable) {
-                    ApplyGlassCapture(result->frame, std::move(result->pixels), result->width,
-                                      result->height);
-                    if (g_app.liveSampling) NoteAppliedSample();
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
-            }
-            return 0;
-        }
         case kQuitForInstallerMessage:
             KillTimer(hwnd, kUpdateLaunchTimer);
             g_app.quitting = true;
@@ -2266,7 +1966,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             break;
         case WM_SIZE: {
             if (wParam == SIZE_MINIMIZED) {
-                StopLiveSampling(hwnd);
                 StopViewAnimation(hwnd);
                 DiscardRenderTarget();
                 return 0;
@@ -2338,17 +2037,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
-        case WM_ENTERSIZEMOVE:
-            RefreshMainBackdropForDrag(hwnd);
-            break;
-        case WM_EXITSIZEMOVE:
-            break;
-        case WM_MOVE:
-            if (GlassEnabled() && g_app.glassAvailable) {
-                InvalidateRect(hwnd, nullptr, FALSE);
-                UpdateWindow(hwnd);
-            }
-            return 0;
         case WM_NCPAINT:
             return 0;
         case WM_SETTINGCHANGE:
@@ -2431,7 +2119,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 HandleHotkeyCaptureKey(wParam);
                 return 0;
             }
-            if (g_probe.Active() && wParam >= VK_F1 && wParam <= VK_F11) {
+            if (g_probe.Active() && wParam >= VK_F1 && wParam <= VK_F8) {
                 SwitchProbeVariant(hwnd, static_cast<int>(wParam - VK_F1) + kProbeAlphaOnly);
                 return 0;
             }
@@ -2467,12 +2155,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
                 if (g_app.view == MainView::Home) {
                     g_app.focusControl = wParam == VK_LEFT ? kFullScreen : kRegion;
                     InvalidateRect(hwnd, nullptr, FALSE);
-                } else if (g_app.focusControl >= kGlassNone &&
-                           g_app.focusControl <= kGlassRealtime) {
+                } else if (g_app.focusControl >= kStyleSolid &&
+                           g_app.focusControl <= kStyleTranslucent) {
                     int selected = static_cast<int>(g_app.glassMode);
-                    selected = (selected + (wParam == VK_RIGHT ? 1 : 3)) % 4;
+                    selected = (selected + (wParam == VK_RIGHT ? 1 : 2)) % 3;
                     SetGlassMode(static_cast<GlassMode>(selected));
-                    g_app.focusControl = kGlassNone + selected;
+                    g_app.focusControl = kStyleSolid + selected;
                 } else {
                     int selected = static_cast<int>(g_app.themeMode);
                     selected = (selected + (wParam == VK_RIGHT ? 1 : 2)) % 3;
@@ -2527,7 +2215,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
             RemoveTrayIcon();
             DestroyOverlayForExit();
             JoinUpdateThread();
-            StopLiveSampling(hwnd);
             g_app.hwnd = nullptr;
             DiscardRenderTarget();
             PostQuitMessage(0);
@@ -2546,277 +2233,19 @@ void SetStatus(std::wstring text, AppState::StatusKind kind) {
     if (g_app.hwnd) InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
-bool CaptureMainBackdropNow() {
-    ScreenFrame frame;
-    std::wstring error;
-    std::vector<uint32_t> pixels;
-    int width = 0;
-    int height = 0;
-    if (!CaptureScreen(&frame, &error, false, false) ||
-        !BuildGlassImage(frame, kMainGlassScale, &pixels, &width, &height)) {
-        return false;
-    }
-
-    g_app.glassPixels = std::move(pixels);
-    g_app.glassWidth = width;
-    g_app.glassHeight = height;
-    g_app.glassScreenX = frame.x;
-    g_app.glassScreenY = frame.y;
-    g_app.glassScreenWidth = frame.width;
-    g_app.glassScreenHeight = frame.height;
-    g_app.glassAvailable = true;
-    g_app.glassBitmap.Reset();
-    if (g_app.rt) {
-        CreateGlassBitmap();
-    } else {
-        UpdatePalette();
-    }
-    return true;
-}
-
-void ApplyGlassCapture(const ScreenFrame& frame, std::vector<uint32_t>&& pixels, int width,
-                       int height) {
-    g_app.glassPixels = std::move(pixels);
-    g_app.glassWidth = width;
-    g_app.glassHeight = height;
-    g_app.glassScreenX = frame.x;
-    g_app.glassScreenY = frame.y;
-    g_app.glassScreenWidth = frame.width;
-    g_app.glassScreenHeight = frame.height;
-    g_app.glassAvailable = true;
-    g_app.glassBitmap.Reset();
-    if (g_app.rt) {
-        CreateGlassBitmap();
-    } else {
-        UpdatePalette();
-    }
-}
-
-// The live sampler grabs the window plus a margin instead of the whole desktop:
-// the grab is what sets the frame rate, and the area is the only part of it we
-// control. The margin keeps a fast drag inside the sampled area, which the
-// anchored crop needs to stay correct.
-bool LiveSampleRect(RECT* out) {
-    if (!g_app.hwnd || !GetWindowRect(g_app.hwnd, out)) return false;
-    // The margin only has to cover what the window can move between two samples,
-    // but a fast flick covers ~80 px, so keep at least 128 px of slack: past the
-    // sampled area the crop clamps and the glass stalls for a frame. The area is
-    // still a fraction of the desktop, which is what the grab time depends on.
-    const int span = std::max(out->right - out->left, out->bottom - out->top);
-    const int margin = std::max(128, span / 4);
-    InflateRect(out, margin, margin);
-    const LONG left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    const LONG top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const LONG right = left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    const LONG bottom = top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    const RECT clipped{std::max(out->left, left), std::max(out->top, top),
-                       std::min(out->right, right), std::min(out->bottom, bottom)};
-    if (clipped.right - clipped.left < 16 || clipped.bottom - clipped.top < 16) return false;
-    *out = clipped;
-    return true;
-}
-
-void LiveSamplerLoop(HWND hwnd) {
-    timeBeginPeriod(1);
-    ScreenFrame scratch;
-    std::vector<uint32_t> pixels;
-    LARGE_INTEGER clock{};
-    LARGE_INTEGER epoch{};
-    LARGE_INTEGER frequency{};
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&epoch);
-    ULONGLONG slot = 0;
-    ULONGLONG lastElapsed = 0;
-    while (!g_liveStop.load(std::memory_order_relaxed)) {
-        if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
-            Sleep(50);
-            slot = 0;
-            continue;
-        }
-        RECT bounds{};
-        int width = 0;
-        int height = 0;
-        LARGE_INTEGER grabStart{};
-        QueryPerformanceCounter(&grabStart);
-        const bool captured =
-            LiveSampleRect(&bounds) && CaptureScreenRect(bounds, &scratch, nullptr) &&
-            BuildGlassImage(scratch, kLiveGlassScale, &pixels, &width, &height);
-        LARGE_INTEGER grabEnd{};
-        QueryPerformanceCounter(&grabEnd);
-        g_liveGrabMs.store(static_cast<int>((grabEnd.QuadPart - grabStart.QuadPart) * 1000 /
-                                           frequency.QuadPart));
-        if (captured) {
-            // Hardware-accelerated or protected surfaces can come back uniformly
-            // black from a GDI grab; dropping those frames avoids a black flash.
-            uint64_t sum = 0;
-            for (uint32_t pixel : pixels) {
-                sum += (pixel & 0xffu) + ((pixel >> 8) & 0xffu) + ((pixel >> 16) & 0xffu);
-            }
-            const double mean =
-                pixels.empty() ? 0.0 : static_cast<double>(sum) /
-                                           (static_cast<double>(pixels.size()) * 3.0);
-            if (mean >= 3.0) {
-                auto frame = std::make_unique<DragCaptureResult>();
-                frame->frame.x = bounds.left;
-                frame->frame.y = bounds.top;
-                frame->frame.width = bounds.right - bounds.left;
-                frame->frame.height = bounds.bottom - bounds.top;
-                frame->pixels = std::move(pixels);
-                frame->width = width;
-                frame->height = height;
-                frame->ok = true;
-                {
-                    std::lock_guard<std::mutex> lock(g_liveFrameMutex);
-                    g_liveFrame = std::move(frame);
-                }
-                g_livePosted.fetch_add(1);
-                if (!g_liveFramePosted.exchange(true)) {
-                    PostMessageW(hwnd, kLiveSampleReadyMessage, 0, 0);
-                }
-                pixels.clear();
-            }
-        }
-        QueryPerformanceCounter(&clock);
-        const ULONGLONG elapsed =
-            (clock.QuadPart - epoch.QuadPart) * 1000 / frequency.QuadPart;
-        g_liveLoopMs.store(static_cast<int>(elapsed - lastElapsed));
-        lastElapsed = elapsed;
-        if (slot + 200 < elapsed) slot = elapsed;  // resync after a stall
-        slot += g_livePeriodMs.load(std::memory_order_relaxed);
-        if (elapsed < slot) {
-            Sleep(static_cast<DWORD>(slot - elapsed));
-        }
-    }
-    timeEndPeriod(1);
-}
-
-void StartLiveSampling(HWND hwnd) {
-    if (!hwnd || g_app.liveSampling) return;
-    // Keep our own glass out of the sample. The window stays visible on screen;
-    // only screen-capture APIs skip it, so there is no flicker and no cloak.
-    SetWindowDisplayAffinity(hwnd, kWdaExcludeFromCapture);
-    if (g_liveThread.joinable()) g_liveThread.join();
-    g_liveStop.store(false);
-    g_livePeriodMs.store(ProbeSampleIntervalMs());
-    g_app.liveSampling = true;
-    g_liveThread = std::thread(LiveSamplerLoop, hwnd);
-}
-
-void StopLiveSampling(HWND hwnd) {
-    g_app.liveSampling = false;
-    g_liveRate = LiveRate{};
-    {
-        std::lock_guard<std::mutex> lock(g_liveFrameMutex);
-        g_liveFrame.reset();
-    }
-    g_liveFramePosted.store(false);
-    if (g_liveThread.joinable()) {
-        g_liveStop.store(true);
-        g_liveThread.join();
-    }
-    if (!hwnd) return;
-    // Idempotent on purpose: leaving the window excluded from capture once the
-    // sampler is off makes it vanish from screenshots and screen recordings.
-    SetWindowDisplayAffinity(hwnd, kWdaNone);
-}
-
+// Re-applies the selected style to the window. The render target has to be
+// rebuilt whenever the surface alpha mode changes, which is why this is not just
+// a DWM call.
 void RefreshMainBackdrop() {
-    if (!g_app.hwnd) return;
-    const bool visible = IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd);
-    const bool probeSampler = g_probe.Usable() && ProbeUsesSampler();
-    if ((g_probe.Usable() && !probeSampler) || g_app.glassMode == GlassMode::Realtime) {
-        // The material and the desktop are composited by DWM: nothing to grab, so
-        // this mode costs nothing while the window moves.
-        StopLiveSampling(g_app.hwnd);
-        g_app.glassBitmap.Reset();
-        g_app.glassPixels.clear();
-        g_app.glassAvailable = false;
-        UpdatePalette();
-        return;
+    HWND hwnd = g_app.hwnd;
+    if (!hwnd) return;
+    ApplyGlassStyle(hwnd);
+    if (g_app.rt) {
+        DiscardRenderTarget();
+        EnsureRenderTarget(hwnd);
     }
-    if (!GlassEnabled()) {
-        StopLiveSampling(g_app.hwnd);
-        g_app.glassBitmap.Reset();
-        g_app.glassAvailable = false;
-        DisableSystemBackdrop(g_app.hwnd);
-        UpdatePalette();
-        return;
-    }
-
-    if (g_app.glassMode == GlassMode::Dynamic || probeSampler) {
-        StopLiveSampling(g_app.hwnd);
-        if (visible) {
-            StartLiveSampling(g_app.hwnd);
-            InvalidateRect(g_app.hwnd, nullptr, FALSE);
-            return;
-        }
-        // Hidden or minimized: nothing to sample, keep the window opaque.
-        g_app.glassBitmap.Reset();
-        g_app.glassPixels.clear();
-        g_app.glassAvailable = false;
-        DisableSystemBackdrop(g_app.hwnd);
-        UpdatePalette();
-        return;
-    }
-
-    StopLiveSampling(g_app.hwnd);
-    DisableSystemBackdrop(g_app.hwnd);
-    if (visible) return;
-
-    g_app.glassBitmap.Reset();
-    if (!CaptureMainBackdropNow()) {
-        g_app.glassPixels.clear();
-        g_app.glassWidth = 0;
-        g_app.glassHeight = 0;
-        g_app.glassAvailable = false;
-        UpdatePalette();
-        InvalidateRect(g_app.hwnd, nullptr, FALSE);
-        return;
-    }
-    InvalidateRect(g_app.hwnd, nullptr, FALSE);
-}
-
-void RefreshMainBackdropForDrag(HWND hwnd) {
-    if (!hwnd || !GlassEnabled()) return;
-    if (g_probe.Usable() && !ProbeUsesSampler()) return;
-    if (g_app.glassMode == GlassMode::Realtime) return;
-    if (g_app.glassMode == GlassMode::Dynamic || (g_probe.Usable() && ProbeUsesSampler())) {
-        return;  // the live timer covers this
-    }
-    if (g_app.dragCapturePending) return;
-
-    // Capture on a worker thread so the modal drag loop is not stalled. The
-    // window is excluded from capture (not hidden), so the sample stays correct
-    // even while the window is already moving, and there is no visible flash.
-    if (SetWindowDisplayAffinity(hwnd, kWdaExcludeFromCapture)) {
-        g_app.dragCapturePending = true;
-        DwmFlush();
-        std::thread([hwnd] {
-            auto* result = new DragCaptureResult();
-            std::wstring error;
-            result->ok = CaptureScreen(&result->frame, &error, false, false) &&
-                         BuildGlassImage(result->frame, kMainGlassScale, &result->pixels,
-                                         &result->width, &result->height);
-            if (!PostMessageW(hwnd, kDragCaptureDoneMessage, 0,
-                              reinterpret_cast<LPARAM>(result))) {
-                delete result;
-            }
-        }).detach();
-        return;
-    }
-
-    // Older systems without capture exclusion: cloak for one composition so the
-    // capture contains the desktop behind us rather than our own glass surface.
-    BOOL cloak = TRUE;
-    if (FAILED(DwmSetWindowAttribute(hwnd, kDwmaCloak, &cloak, sizeof(cloak)))) return;
-    DwmFlush();
-    const bool refreshed = CaptureMainBackdropNow();
-    if (refreshed) {
-        InvalidateRect(hwnd, nullptr, FALSE);
-        UpdateWindow(hwnd);
-    }
-    cloak = FALSE;
-    DwmSetWindowAttribute(hwnd, kDwmaCloak, &cloak, sizeof(cloak));
+    UpdatePalette();
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 void ApplyWindowTheme(HWND hwnd, bool dark) {
@@ -2868,7 +2297,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             if (_wcsicmp(arguments[i], L"--updated") == 0) updatedLaunch = true;
             if (_wcsnicmp(arguments[i], L"--probe=", 8) == 0) {
                 const int variant = _wtoi(arguments[i] + 8);
-                if (variant >= kProbeOff && variant <= kProbeFastBlend) {
+                if (variant >= kProbeOff && variant <= kProbeMicaStandard) {
                     g_probe.requested = true;
                     g_probe.variant = variant;
                 }
@@ -3012,7 +2441,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     const UINT systemDpi = GetDpiForSystem();
     const int windowWidth = MulDiv(static_cast<int>(kClientWidth), systemDpi, 96);
     const int windowHeight = MulDiv(static_cast<int>(ClientHeightForView()), systemDpi, 96);
-    const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
+    // WS_THICKFRAME stays for the window's whole life: DWM only composes a system
+    // material behind a window it treats as framed. WM_NCCALCSIZE returns 0, so no
+    // frame area is added and the layout is unchanged.
+    const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX;
     // The window must keep a redirection bitmap: WS_EX_NOREDIRECTIONBITMAP would
     // leave DWM no surface to draw the system Acrylic/Mica backdrop into, so the
     // dynamic glass mode would render nothing.
@@ -3037,7 +2469,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
     g_app.dpi = DpiOfWindow(hwnd);
     ApplyBackdropProbe(hwnd);
-    ApplyRealtimeAlpha(hwnd);
+    ApplyGlassStyle(hwnd);
     CenterMainWindow(hwnd, windowWidth, windowHeight);
     RegisterCurrentHotkeys(true);
 

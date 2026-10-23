@@ -87,7 +87,6 @@ target_link_libraries(EasyQR PRIVATE
     ole32
     uuid
     advapi32
-    winmm
     ZXing
 )
 

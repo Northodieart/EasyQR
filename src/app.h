@@ -15,7 +15,7 @@ struct AppState {
     bool systemDark = false;
     bool dark = false;
     ThemeMode themeMode = ThemeMode::System;
-    GlassMode glassMode = GlassMode::Static;
+    GlassMode glassMode = GlassMode::Acrylic;
     MainView view = MainView::Home;
 
     bool closeToTray = false;
@@ -45,14 +45,6 @@ struct AppState {
 
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> dwrite;
-    std::vector<uint32_t> glassPixels;
-    int glassWidth = 0;
-    int glassHeight = 0;
-    int glassScreenX = 0;
-    int glassScreenY = 0;
-    int glassScreenWidth = 0;
-    int glassScreenHeight = 0;
-    bool glassAvailable = false;
 
     bool viewAnimationActive = false;
     ULONGLONG viewAnimationStart = 0;
@@ -71,10 +63,6 @@ struct AppState {
     ComPtr<ID2D1RenderTarget> rt;
     ID2D1HwndRenderTarget* hwndTarget = nullptr;
     ComPtr<ID2D1SolidColorBrush> brush;
-    ComPtr<ID2D1Bitmap> glassBitmap;
-    bool liveSampling = false;
-    bool realtimeAlpha = false;  // DWM honours our surface alpha (Win11 24H2+)
-    bool dragCapturePending = false;
 
     UINT dpi = 96;
     int hoverControl = -1;
@@ -88,7 +76,7 @@ struct AppState {
 
 extern AppState g_app;
 
-inline bool GlassEnabled() { return g_app.glassMode != GlassMode::None; }
+inline bool GlassEnabled() { return g_app.glassMode != GlassMode::Solid; }
 
 void RefreshTheme();
 void SetThemeMode(ThemeMode mode);

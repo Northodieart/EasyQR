@@ -4,7 +4,7 @@
 
 enum class ThemeMode { System = 0, Light = 1, Dark = 2 };
 
-enum class GlassMode { None = 0, Static = 1, Dynamic = 2, Realtime = 3 };
+enum class GlassMode { Solid = 0, Acrylic = 1, Translucent = 2 };
 
 struct HotkeyBinding {
     UINT mods = 0;
