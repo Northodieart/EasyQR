@@ -131,8 +131,8 @@ ZXing-C++ 提供的标准读取器已全部启用，常见包括：
 | 文件 | 说明 |
 | --- | --- |
 | `EasyQR.exe` | 便携版单文件，双击即用 |
-| `EasyQR-1.6.0-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
-| `EasyQR-1.6.0-x64-setup.exe` | 安装版 |
+| `EasyQR-1.6.1-x64-portable.zip` | 便携版压缩包（含 EXE 与 LICENSE） |
+| `EasyQR-1.6.1-x64-setup.exe` | 安装版 |
 | `SHA256SUMS.txt` | 上述文件的 SHA-256 校验和 |
 
 ### 安装版
@@ -174,8 +174,8 @@ sudo apt install cmake g++-mingw-w64-x86-64 nsis zip
 自动更新依赖 GitHub Release 资产。推送版本 tag 即可由 Actions 自动构建并发布：
 
 ```bash
-git tag v1.6.0
-git push origin v1.6.0
+git tag v1.6.1
+git push origin v1.6.1
 ```
 
 发布内容必须包含 `EasyQR.exe`、`EasyQR-<版本>-x64-portable.zip`、`EasyQR-<版本>-x64-setup.exe` 和 `SHA256SUMS.txt`；仓库内的 `build.yml` `release` job 已按此约定自动上传。
@@ -220,6 +220,10 @@ scripts/           构建脚本
 ```
 
 ## 更新记录
+
+### 1.6.1
+
+- 重新构建 1.6.0（发布资产无法原地替换），并加一道保护：透明表面一旦绘制失败，窗口会变成不可见，所以这时自动切回纯色并在主界面提示，不会再留下"全透明、点不到"的窗口。
 
 ### 1.6.0
 

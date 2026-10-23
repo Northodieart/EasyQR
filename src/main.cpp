@@ -1297,6 +1297,13 @@ void PaintMainWindow(HWND hwnd) {
     if (hr == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) {
         DiscardRenderTarget();
         InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+    if (FAILED(hr) && g_app.glassMode != GlassMode::Solid) {
+        // A translucent surface that fails to draw leaves an invisible window, so
+        // fall back to the solid style the moment that happens.
+        SetStatus(L"毛玻璃渲染失败，已切回纯色", AppState::StatusKind::Error);
+        SetGlassMode(GlassMode::Solid);
     }
 }
 
